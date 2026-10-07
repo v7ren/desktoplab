@@ -141,25 +141,30 @@
             return;
           }
           const peer = snap?.peers.find((item) => item.code === typed);
-          if (!peer) {
-            error = "No computer with that code is on the network yet. Open DevHop on the other computer.";
-            return;
-          }
-          if (peer.paired) {
+          if (peer?.paired) {
             error = "That computer is already paired.";
             return;
           }
           error = "";
-          void send({ ConfirmPair: { id: peer.id, code: typed } }).then(() => {
-            typedCode = "";
-            return refresh();
-          });
+          void send({ PairByCode: typed }).then(refresh);
         }}>
           <label>Code on the other computer
             <input bind:value={typedCode} inputmode="numeric" maxlength="6" placeholder="6 digits" aria-label="Pairing code" />
           </label>
           <button type="submit">Pair</button>
         </form>
+        {#if snap.peers.length === 0}
+          <p class="muted">No other computer is visible on this network yet.</p>
+        {:else}
+          <ul>
+            {#each snap.peers as peer}
+              <li>{peer.name} — {peer.paired ? "paired" : "not paired yet"}</li>
+            {/each}
+          </ul>
+        {/if}
+        {#if snap.status && snap.status !== "ready" && snap.status !== "starting"}
+          <p class="muted">{snap.status}</p>
+        {/if}
       </div>
     {/if}
     {#if page === "Layout" && snap}

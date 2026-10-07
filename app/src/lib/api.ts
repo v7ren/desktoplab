@@ -75,6 +75,7 @@ export type Cmd =
   | { SetModifiers: { ctrl_cmd: boolean; win_option: boolean } }
   | { SetScroll: { natural: boolean; speed: number } }
   | { ConfirmPair: { id: string; code: string } }
+  | { PairByCode: string }
   | { RejectPair: string }
   | { Unpair: string }
   | { AddIp: string }
@@ -232,6 +233,19 @@ function applyMock(cmd: Cmd) {
     }
     mock.pairing_code = null;
     mock.status = "paired";
+  } else if ("PairByCode" in cmd) {
+    const peer = mock.peers.find((item) => item.code === cmd.PairByCode);
+    if (!peer) {
+      mock.status = "Looking for that code. Leave DevHop open on the other computer.";
+      return;
+    }
+    if (peer.paired) {
+      mock.status = `${peer.name} is already paired`;
+      return;
+    }
+    peer.paired = true;
+    peer.code = null;
+    mock.status = `connecting to ${peer.name}`;
   } else if ("RejectPair" in cmd) {
     const peer = mock.peers.find((item) => item.id === cmd.RejectPair);
     if (peer) peer.code = null;
