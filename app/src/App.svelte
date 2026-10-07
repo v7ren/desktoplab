@@ -8,6 +8,7 @@
   let page = $state<Page>("Layout");
   let snap = $state<Snapshot | null>(null);
   let typedCode = $state("");
+  let typedAddr = $state("");
   let find = $state<{ x: number; y: number } | null>(null);
   let autostart = $state(false);
   let error = $state("");
@@ -128,6 +129,9 @@
         <h2>Pair on this network</h2>
         <p>Code on this computer</p>
         <p class="code">{snap.local_code || "……"}</p>
+        {#if snap.local_addr}
+          <p class="muted">This computer's address: {snap.local_addr}</p>
+        {/if}
         <p>Read this code on the other computer and type it there. In the box below, type the code shown on that computer.</p>
         <form onsubmit={(e) => {
           e.preventDefault();
@@ -154,14 +158,33 @@
           <button type="submit">Pair</button>
         </form>
         {#if snap.peers.length === 0}
-          <p class="muted">No other computer is visible on this network yet.</p>
+          <p class="muted">No other computer is visible on this network yet. If it is running DevHop, add it by its address below.</p>
         {:else}
           <ul>
             {#each snap.peers as peer}
-              <li>{peer.name} — {peer.paired ? "paired" : "not paired yet"}</li>
+              <li>
+                {peer.name} ({peer.addr}) —
+                {#if peer.paired}paired{:else}not paired yet{/if},
+                {peer.online ? "connected" : "not connected"}
+              </li>
             {/each}
           </ul>
         {/if}
+        <form onsubmit={(e) => {
+          e.preventDefault();
+          const addr = typedAddr.trim();
+          if (!addr) {
+            error = "Type the other computer's address, as shown on its DevHop screen.";
+            return;
+          }
+          error = "";
+          void send({ AddIp: addr }).then(refresh);
+        }}>
+          <label>Not listed? Add it by address
+            <input bind:value={typedAddr} placeholder="192.168.0.20 or 192.168.0.20:42424" aria-label="Other computer's address" />
+          </label>
+          <button type="submit">Connect</button>
+        </form>
         {#if snap.status && snap.status !== "ready" && snap.status !== "starting"}
           <p class="muted">{snap.status}</p>
         {/if}
