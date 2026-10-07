@@ -7,7 +7,6 @@
 
   let page = $state<Page>("Layout");
   let snap = $state<Snapshot | null>(null);
-  let ip = $state("");
   let typedCode = $state("");
   let find = $state<{ x: number; y: number } | null>(null);
   let autostart = $state(false);
@@ -124,48 +123,40 @@
         <button onclick={() => send("PromptPermissions").then(refresh)}>Grant permissions</button>
       </div>
     {/if}
-    {#if snap?.pairing_code}
+    {#if snap}
       <div class="card pair">
         <h2>Pair on this network</h2>
-        <p>On the other computer, open Devices and enter this address:</p>
-        <p class="code">{snap.local_addr}</p>
         <p>Code on this computer</p>
-        <p class="code">{snap.pairing_code}</p>
+        <p class="code">{snap.local_code || "……"}</p>
+        <p>Read this code on the other computer and type it there. In the box below, type the code shown on that computer.</p>
         <form onsubmit={(e) => {
           e.preventDefault();
-          const peer = snap?.peers.find((item) => item.code);
-          if (!peer) {
-            error = "The other computer is not connected yet.";
+          const typed = typedCode.trim();
+          if (!/^\d{6}$/.test(typed)) {
+            error = "Type the 6-digit code shown on the other computer.";
             return;
           }
-          if (typedCode.trim() !== snap?.pairing_code) {
-            error = "That code does not match this computer. Type the code shown on the other computer.";
+          if (typed === snap?.local_code) {
+            error = "That is this computer. Type the code shown on the other one.";
+            return;
+          }
+          const peer = snap?.peers.find((item) => item.code === typed);
+          if (!peer) {
+            error = "No computer with that code is on the network yet. Open DevHop on the other computer.";
+            return;
+          }
+          if (peer.paired) {
+            error = "That computer is already paired.";
             return;
           }
           error = "";
-          void send({ ConfirmPair: { id: peer.id, code: typedCode.trim() } }).then(() => {
+          void send({ ConfirmPair: { id: peer.id, code: typed } }).then(() => {
             typedCode = "";
             return refresh();
           });
         }}>
           <label>Code on the other computer
             <input bind:value={typedCode} inputmode="numeric" maxlength="6" placeholder="6 digits" aria-label="Pairing code" />
-          </label>
-          <button type="submit">Confirm code</button>
-          <button type="button" onclick={() => {
-            const peer = snap?.peers.find((item) => item.code);
-            if (peer) void send({ RejectPair: peer.id }).then(refresh);
-          }}>Cancel</button>
-        </form>
-      </div>
-    {:else if snap}
-      <div class="card pair">
-        <h2>Pair on this network</h2>
-        <p>On the other computer, open Devices and enter this address. The 6-digit code shows here once it answers.</p>
-        <p class="code">{snap.local_addr}</p>
-        <form onsubmit={(e) => { e.preventDefault(); void send({ AddIp: ip }).then(() => { ip = ""; return refresh(); }); }}>
-          <label>Other computer
-            <input bind:value={ip} placeholder="192.168.1.20" aria-label="Other computer address" />
           </label>
           <button type="submit">Pair</button>
         </form>
@@ -211,14 +202,11 @@
         {#each snap.peers as peer}
           <li>
             <strong>{peer.name}</strong>
-            <span class="muted">{peer.addr} {peer.os} {peer.online ? "online" : "offline"}</span>
-            {#if peer.code}
-              <span class="code">{peer.code}</span>
-              <span class="muted">Type this code in the box above if it matches the other computer.</span>
-            {:else if !peer.paired}
-              <button onclick={() => send({ AddIp: peer.addr }).then(refresh)}>Pair</button>
-            {:else}
+            <span class="muted">{peer.os} {peer.online ? "online" : "offline"}</span>
+            {#if peer.paired}
               <button onclick={() => send({ Unpair: peer.id }).then(refresh)}>Unpair</button>
+            {:else}
+              <span class="muted">Type its code in the box above.</span>
             {/if}
           </li>
         {/each}

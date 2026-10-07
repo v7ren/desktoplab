@@ -58,6 +58,7 @@ export type Snapshot = {
   monitors: Monitor[];
   transfers: Transfer[];
   pairing_code: string | null;
+  local_code: string;
   local_addr: string;
   accessibility: boolean;
   input_monitoring: boolean;
@@ -132,8 +133,9 @@ let mock: Snapshot = {
       path: "Downloads/DevHop",
     },
   ],
-  pairing_code: "482913",
-  local_addr: "192.168.1.8:42424",
+  pairing_code: null,
+  local_code: "159264",
+  local_addr: "",
   accessibility: true,
   input_monitoring: true,
   status: "ready",
@@ -219,11 +221,11 @@ function applyMock(cmd: Cmd) {
     if (key in mock.hotkeys) mock.hotkeys[key] = cmd.SetHotkey.chord;
   } else if ("ConfirmPair" in cmd) {
     const { id, code } = cmd.ConfirmPair;
-    if (code !== mock.pairing_code) {
+    const peer = mock.peers.find((item) => item.id === id);
+    if (!peer || peer.code !== code) {
       mock.status = "pairing code does not match";
       return;
     }
-    const peer = mock.peers.find((item) => item.id === id);
     if (peer) {
       peer.paired = true;
       peer.code = null;
