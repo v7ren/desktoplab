@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- macOS 15+ blocks LAN broadcast and mDNS until the user allows Local Network access. -->
+  <key>NSLocalNetworkUsageDescription</key>
+  <string>DevHop finds and connects to your other computers on this network to share the mouse, keyboard, clipboard and files.</string>
+  <key>NSBonjourServices</key>
+  <array>
+    <string>_devhop._udp</string>
+  </array>
+</dict>
+</plist>
