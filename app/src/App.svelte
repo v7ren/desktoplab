@@ -8,6 +8,7 @@
   let page = $state<Page>("Layout");
   let snap = $state<Snapshot | null>(null);
   let ip = $state("");
+  let typedCode = $state("");
   let find = $state<{ x: number; y: number } | null>(null);
   let autostart = $state(false);
   let error = $state("");
@@ -125,9 +126,49 @@
     {/if}
     {#if snap?.pairing_code}
       <div class="card pair">
-        <h2>Pairing code</h2>
+        <h2>Pair on this network</h2>
+        <p>On the other computer, open Devices and enter this address:</p>
+        <p class="code">{snap.local_addr}</p>
+        <p>Code on this computer</p>
         <p class="code">{snap.pairing_code}</p>
-        <p>Confirm this number matches the other computer.</p>
+        <form onsubmit={(e) => {
+          e.preventDefault();
+          const peer = snap?.peers.find((item) => item.code);
+          if (!peer) {
+            error = "The other computer is not connected yet.";
+            return;
+          }
+          if (typedCode.trim() !== snap?.pairing_code) {
+            error = "That code does not match this computer. Type the code shown on the other computer.";
+            return;
+          }
+          error = "";
+          void send({ ConfirmPair: { id: peer.id, code: typedCode.trim() } }).then(() => {
+            typedCode = "";
+            return refresh();
+          });
+        }}>
+          <label>Code on the other computer
+            <input bind:value={typedCode} inputmode="numeric" maxlength="6" placeholder="6 digits" aria-label="Pairing code" />
+          </label>
+          <button type="submit">Confirm code</button>
+          <button type="button" onclick={() => {
+            const peer = snap?.peers.find((item) => item.code);
+            if (peer) void send({ RejectPair: peer.id }).then(refresh);
+          }}>Cancel</button>
+        </form>
+      </div>
+    {:else if snap}
+      <div class="card pair">
+        <h2>Pair on this network</h2>
+        <p>On the other computer, open Devices and enter this address. The 6-digit code shows here once it answers.</p>
+        <p class="code">{snap.local_addr}</p>
+        <form onsubmit={(e) => { e.preventDefault(); void send({ AddIp: ip }).then(() => { ip = ""; return refresh(); }); }}>
+          <label>Other computer
+            <input bind:value={ip} placeholder="192.168.1.20" aria-label="Other computer address" />
+          </label>
+          <button type="submit">Pair</button>
+        </form>
       </div>
     {/if}
     {#if page === "Layout" && snap}
@@ -166,10 +207,6 @@
       {/each}
     {:else if page === "Devices" && snap}
       <h2>Devices</h2>
-      <form onsubmit={(e) => { e.preventDefault(); void send({ AddIp: ip }).then(() => { ip = ""; return refresh(); }); }}>
-        <input bind:value={ip} placeholder="192.168.1.20" aria-label="Manual address" />
-        <button type="submit">Add by IP</button>
-      </form>
       <ul>
         {#each snap.peers as peer}
           <li>
@@ -177,9 +214,10 @@
             <span class="muted">{peer.addr} {peer.os} {peer.online ? "online" : "offline"}</span>
             {#if peer.code}
               <span class="code">{peer.code}</span>
-              <button onclick={() => send({ ConfirmPair: peer.id }).then(refresh)}>Confirm</button>
-              <button onclick={() => send({ RejectPair: peer.id }).then(refresh)}>Reject</button>
-            {:else if peer.paired}
+              <span class="muted">Type this code in the box above if it matches the other computer.</span>
+            {:else if !peer.paired}
+              <button onclick={() => send({ AddIp: peer.addr }).then(refresh)}>Pair</button>
+            {:else}
               <button onclick={() => send({ Unpair: peer.id }).then(refresh)}>Unpair</button>
             {/if}
           </li>
@@ -253,6 +291,7 @@
   .error { color: #ff8d8d; }
   .card { background: #181a1f; padding: 16px; border-radius: 12px; margin-bottom: 16px; }
   .code { font-size: 32px; letter-spacing: 6px; margin: 0; }
+  input[aria-label="Pairing code"] { font-size: 28px; letter-spacing: 6px; max-width: 220px; }
   .canvas { position: relative; height: 420px; background: #181a1f; border-radius: 12px; overflow: auto; }
   .monitor {
     position: absolute;

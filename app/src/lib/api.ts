@@ -58,6 +58,7 @@ export type Snapshot = {
   monitors: Monitor[];
   transfers: Transfer[];
   pairing_code: string | null;
+  local_addr: string;
   accessibility: boolean;
   input_monitoring: boolean;
   status: string;
@@ -72,7 +73,7 @@ export type Cmd =
   | { SetClipboard: boolean }
   | { SetModifiers: { ctrl_cmd: boolean; win_option: boolean } }
   | { SetScroll: { natural: boolean; speed: number } }
-  | { ConfirmPair: string }
+  | { ConfirmPair: { id: string; code: string } }
   | { RejectPair: string }
   | { Unpair: string }
   | { AddIp: string }
@@ -132,6 +133,7 @@ let mock: Snapshot = {
     },
   ],
   pairing_code: "482913",
+  local_addr: "192.168.1.8:42424",
   accessibility: true,
   input_monitoring: true,
   status: "ready",
@@ -216,7 +218,12 @@ function applyMock(cmd: Cmd) {
     const key = cmd.SetHotkey.action as keyof Hotkeys;
     if (key in mock.hotkeys) mock.hotkeys[key] = cmd.SetHotkey.chord;
   } else if ("ConfirmPair" in cmd) {
-    const peer = mock.peers.find((item) => item.id === cmd.ConfirmPair);
+    const { id, code } = cmd.ConfirmPair;
+    if (code !== mock.pairing_code) {
+      mock.status = "pairing code does not match";
+      return;
+    }
+    const peer = mock.peers.find((item) => item.id === id);
     if (peer) {
       peer.paired = true;
       peer.code = null;
