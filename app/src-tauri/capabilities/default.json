@@ -1,0 +1,11 @@
+{
+  "identifier": "default",
+  "description": "Settings window",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "opener:default",
+    "autostart:allow-enable",
+    "autostart:allow-disable"
+  ]
+}

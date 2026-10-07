@@ -1,0 +1,20 @@
+[package]
+name = "hop-transfer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "Chunked file transfer with BLAKE3 checks, staging, and cancel"
+
+[dependencies]
+serde.workspace = true
+postcard.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+blake3.workspace = true
+unicode-normalization.workspace = true
+filetime.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

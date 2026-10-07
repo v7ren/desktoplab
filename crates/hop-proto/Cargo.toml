@@ -1,0 +1,16 @@
+[package]
+name = "hop-proto"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "Postcard wire messages, handshake, and HID key codes"
+
+[dependencies]
+serde.workspace = true
+postcard.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

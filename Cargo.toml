@@ -1,0 +1,50 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/hop-core",
+    "crates/hop-proto",
+    "crates/hop-platform",
+    "crates/hop-transfer",
+    "crates/hop-net",
+    "crates/hop-engine",
+    "app/src-tauri",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+rust-version = "1.85"
+publish = false
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+postcard = { version = "1", features = ["alloc"] }
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "net"] }
+blake3 = "1"
+unicode-normalization = "0.1"
+sha2 = "0.10"
+hex = "0.4"
+rcgen = "0.13"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+quinn = "0.11"
+mdns-sd = "0.13"
+x509-parser = { version = "0.16", features = ["verify"] }
+crossbeam-channel = "0.5"
+arc-swap = "1"
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+tracing-appender = "0.2"
+dirs = "6"
+uuid = { version = "1", features = ["v4"] }
+image = { version = "0.25", default-features = false, features = ["png", "bmp", "tiff"] }
+filetime = "0.2"
+hop-core = { path = "crates/hop-core" }
+hop-proto = { path = "crates/hop-proto" }
+hop-platform = { path = "crates/hop-platform" }
+hop-transfer = { path = "crates/hop-transfer" }
+hop-net = { path = "crates/hop-net" }
+hop-engine = { path = "crates/hop-engine" }

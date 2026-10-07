@@ -1,0 +1,27 @@
+[package]
+name = "hop-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "Wires geometry, the platform, and the network"
+
+[dependencies]
+hop-core.workspace = true
+hop-proto.workspace = true
+hop-platform.workspace = true
+hop-transfer.workspace = true
+hop-net.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+dirs.workspace = true
+uuid.workspace = true
+crossbeam-channel.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
