@@ -21,7 +21,14 @@ use crate::identity::Identity;
 
 const ALPN: &[u8] = b"devhop";
 pub const CONTROL_PRIORITY: i32 = 100;
+pub const CLIPBOARD_PRIORITY: i32 = 50;
 pub const TRANSFER_PRIORITY: i32 = 0;
+
+pub const STREAM_CONTROL: u8 = 1;
+pub const STREAM_CLIPBOARD: u8 = 2;
+pub const STREAM_TRANSFER: u8 = 3;
+
+pub const CLIPBOARD_CHUNK_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Error)]
 pub enum NetError {
@@ -39,6 +46,7 @@ pub enum NetError {
     Identity(#[from] crate::identity::IdentityError),
 }
 
+#[derive(Clone)]
 pub struct Endpoint {
     inner: quinn::Endpoint,
     client: quinn::ClientConfig,
@@ -63,11 +71,21 @@ impl Endpoint {
     }
 
     pub async fn accept(&self) -> Result<Link, NetError> {
-        let incoming = self.inner.accept().await.ok_or(NetError::Closed)?;
+        let incoming = self.incoming().await?;
+        Self::complete(incoming).await
+    }
+
+    /// Waits for the next connection attempt without running its handshake, so
+    /// the caller can run handshakes in parallel and never cancel one halfway.
+    pub async fn incoming(&self) -> Result<quinn::Incoming, NetError> {
+        self.inner.accept().await.ok_or(NetError::Closed)
+    }
+
+    pub async fn complete(incoming: quinn::Incoming) -> Result<Link, NetError> {
         let conn = incoming
             .await
             .map_err(|err| NetError::Conn(err.to_string()))?;
-        Link::from_conn(conn)
+        Link::from_conn(conn, false)
     }
 
     pub async fn dial(&self, addr: SocketAddr) -> Result<Link, NetError> {
@@ -78,7 +96,7 @@ impl Endpoint {
         let conn = connecting
             .await
             .map_err(|err| NetError::Conn(err.to_string()))?;
-        Link::from_conn(conn)
+        Link::from_conn(conn, true)
     }
 }
 
@@ -87,22 +105,37 @@ pub fn should_dial(local_id: &str, remote_id: &str) -> bool {
     local_id < remote_id
 }
 
+/// When two computers dial each other at once, both keep the connection that
+/// the smaller id opened, so they always agree on which one to drop.
+pub fn is_preferred(dialed: bool, local_id: &str, remote_id: &str) -> bool {
+    dialed == should_dial(local_id, remote_id)
+}
+
 #[derive(Clone)]
 pub struct Link {
     conn: quinn::Connection,
     pub peer_fingerprint: String,
     pub peer_addr: SocketAddr,
+    /// `true` when this side opened the connection.
+    pub dialed: bool,
 }
 
 impl Link {
-    fn from_conn(conn: quinn::Connection) -> Result<Self, NetError> {
+    fn from_conn(conn: quinn::Connection, dialed: bool) -> Result<Self, NetError> {
         let peer_addr = conn.remote_address();
         let peer_fingerprint = fingerprint_of(&conn)?;
         Ok(Self {
             conn,
             peer_fingerprint,
             peer_addr,
+            dialed,
         })
+    }
+
+    /// Stable for the life of the connection, so late events from a replaced
+    /// connection can be told apart from the current one.
+    pub fn id(&self) -> usize {
+        self.conn.stable_id()
     }
 
     pub fn send_datagram(&self, bytes: &[u8]) -> Result<(), NetError> {
@@ -121,11 +154,15 @@ impl Link {
     }
 
     pub async fn open_control(&self) -> Result<(SendStream, RecvStream), NetError> {
-        self.open_bi(CONTROL_PRIORITY).await
+        self.open_typed(STREAM_CONTROL, CONTROL_PRIORITY).await
+    }
+
+    pub async fn open_clipboard(&self) -> Result<(SendStream, RecvStream), NetError> {
+        self.open_typed(STREAM_CLIPBOARD, CLIPBOARD_PRIORITY).await
     }
 
     pub async fn open_transfer(&self) -> Result<(SendStream, RecvStream), NetError> {
-        self.open_bi(TRANSFER_PRIORITY).await
+        self.open_typed(STREAM_TRANSFER, TRANSFER_PRIORITY).await
     }
 
     pub async fn accept_bi(&self) -> Result<(SendStream, RecvStream), NetError> {
@@ -135,18 +172,41 @@ impl Link {
             .map_err(|err| NetError::Conn(err.to_string()))
     }
 
-    async fn open_bi(&self, priority: i32) -> Result<(SendStream, RecvStream), NetError> {
-        let (send, recv) = self
+    pub async fn accept_typed(&self) -> Result<(u8, SendStream, RecvStream), NetError> {
+        let (mut send, mut recv) = self.accept_bi().await?;
+        let mut kind = [0u8; 1];
+        match recv.read_exact(&mut kind).await {
+            Ok(()) => Ok((kind[0], send, recv)),
+            Err(err) => {
+                let _ = send.reset(0u32.into());
+                Err(NetError::Conn(err.to_string()))
+            }
+        }
+    }
+
+    async fn open_typed(
+        &self,
+        kind: u8,
+        priority: i32,
+    ) -> Result<(SendStream, RecvStream), NetError> {
+        let (mut send, recv) = self
             .conn
             .open_bi()
             .await
             .map_err(|err| NetError::Conn(err.to_string()))?;
         let _ = send.set_priority(priority);
+        send.write_all(&[kind])
+            .await
+            .map_err(|err| NetError::Conn(err.to_string()))?;
         Ok((send, recv))
     }
 
     pub fn close(&self) {
         self.conn.close(0u32.into(), b"bye");
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.conn.close_reason().is_some()
     }
 
     /// `quinn::Connection` is cheap to clone and is how a transfer task opens
@@ -227,9 +287,9 @@ fn fingerprint_of(conn: &quinn::Connection) -> Result<String, NetError> {
 fn transport() -> Arc<quinn::TransportConfig> {
     let mut transport = quinn::TransportConfig::default();
     transport.max_idle_timeout(Some(
-        Duration::from_secs(30).try_into().expect("idle timeout"),
+        Duration::from_secs(3).try_into().expect("idle timeout"),
     ));
-    transport.keep_alive_interval(Some(Duration::from_secs(5)));
+    transport.keep_alive_interval(Some(Duration::from_millis(500)));
     transport.datagram_receive_buffer_size(Some(1024 * 1024));
     transport.datagram_send_buffer_size(1024 * 1024);
     Arc::new(transport)
@@ -435,10 +495,12 @@ mod tests {
             write_msg(&mut cs, &hello).await.unwrap();
             (cs, cr)
         });
-        let (ss, mut sr) = tokio::time::timeout(Duration::from_secs(2), server.accept_bi())
-            .await
-            .expect("accept control")
-            .unwrap();
+        let (_kind, ss, mut sr) =
+            tokio::time::timeout(Duration::from_secs(2), server.accept_typed())
+                .await
+                .expect("accept control")
+                .unwrap();
+        assert_eq!(_kind, STREAM_CONTROL);
         let got = tokio::time::timeout(Duration::from_secs(2), read_msg(&mut sr))
             .await
             .expect("read hello")
@@ -498,6 +560,16 @@ mod tests {
         assert_eq!(got, beat);
         drop(server);
         let _ = writing.await;
+    }
+
+    #[test]
+    fn both_sides_prefer_the_same_connection() {
+        // "a" dialed "b": preferred on both ends.
+        assert!(is_preferred(true, "a", "b"));
+        assert!(is_preferred(false, "b", "a"));
+        // "b" dialed "a": dropped on both ends.
+        assert!(!is_preferred(true, "b", "a"));
+        assert!(!is_preferred(false, "a", "b"));
     }
 
     #[test]

@@ -2,6 +2,24 @@
 
 Run these on one Windows machine and one Mac on the same LAN, after both have been paired (the 6-digit code matches on both screens).
 
+## Two-machine gate (N6 + latency)
+
+Before treating the feature tests below as done, run the acceptance checklist in **[two-machine-acceptance.md](two-machine-acceptance.md)**:
+
+- **N6.1–N6.5** — UI on the real PC and Mac (pair, 50 crosses, 8 MB image, cable pull, one hour idle).
+- **N3.4 / R4** — headless **soak** example over **wired** LAN; record RTT p95 (target ≤ 10 ms).
+
+Each checklist item has steps, expected results, log paths, and blank result tables. Paste log tails there (and in R4 below for latency).
+
+### Log locations (UI)
+
+| OS | State / config dir | Logs |
+|----|-------------------|------|
+| Windows | `%APPDATA%\devhop` | `%APPDATA%\devhop\logs\` (`devhop.log` plus tracing rolling files) |
+| macOS | `~/Library/Application Support/devhop` | `~/Library/Application Support/devhop/logs/` |
+
+Override with env var **`DEVHOP_HOME`**. See `hop-engine::runtime::config_dir` and `hop-engine::log`.
+
 ## R1 Hop modes
 
 1. Set hop mode to Relative. Leave a monitor at about 30% across. The cursor arrives at 30% of the next monitor.
@@ -22,8 +40,23 @@ Run these on one Windows machine and one Mac on the same LAN, after both have be
 
 ## R4 Latency
 
-1. On a wired LAN, cross and move the cursor for a few seconds.
-2. The log p95 for that session is at or below 10 ms. A file copy running at the same time does not change that.
+Measured with the **soak** example (`PLAN.md` N3.4), not the Tauri UI. Full steps, exact flags, and commands are in **[two-machine-acceptance.md](two-machine-acceptance.md)** (section N3.4 / R4).
+
+Criteria:
+
+1. On a **wired** LAN, run soak on both machines (one listens, one `--connect` to the other’s IP) for at least 60 seconds (`--secs 60`).
+2. **RTT p95** from the `==== soak summary ====` line (and `soak summary:` in `<--dir>/logs`) is **≤ 10 ms**.
+3. Optional: repeat while a large file copy runs on the same LAN; p95 should still meet the target.
+
+Soak help (flags must match `crates/hop-engine/examples/soak.rs`):
+
+```text
+cargo run -p hop-engine --example soak -- --help
+```
+
+| Result (pass / fail / blocked) | Tester / date | RTT p95 (ms) | Notes | Log tail (`soak summary` or `--dir`/logs) |
+|-------------------------------|---------------|--------------|-------|-------------------------------------------|
+| | | | | |
 
 ## R5 Heartbeat
 

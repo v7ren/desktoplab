@@ -5,6 +5,7 @@ export type Peer = {
   fingerprint: string;
   paired: boolean;
   online: boolean;
+  status: string;
   os: string;
   code: string | null;
 };
@@ -114,6 +115,7 @@ let mock: Snapshot = {
       fingerprint: "ab".repeat(32),
       paired: false,
       online: true,
+      status: "unpaired",
       os: "Macos",
       code: "482913",
     },
@@ -230,6 +232,7 @@ function applyMock(cmd: Cmd) {
     if (peer) {
       peer.paired = true;
       peer.code = null;
+      peer.status = "paired";
     }
     mock.pairing_code = null;
     mock.status = "paired";
@@ -245,6 +248,7 @@ function applyMock(cmd: Cmd) {
     }
     peer.paired = true;
     peer.code = null;
+    peer.status = "paired";
     mock.status = `connecting to ${peer.name}`;
   } else if ("RejectPair" in cmd) {
     const peer = mock.peers.find((item) => item.id === cmd.RejectPair);
@@ -256,6 +260,7 @@ function applyMock(cmd: Cmd) {
     if (peer) {
       peer.paired = false;
       peer.online = false;
+      peer.status = "offline";
     }
   } else if ("AddIp" in cmd) {
     mock.peers.push({
@@ -265,6 +270,7 @@ function applyMock(cmd: Cmd) {
       fingerprint: "",
       paired: false,
       online: false,
+      status: "discovered",
       os: "",
       code: null,
     });

@@ -20,6 +20,14 @@ pub struct Config {
     pub modifiers: ModifierMap,
     pub scroll: ScrollNorm,
     pub port: u16,
+    /// Announce this computer and look for others on the LAN. Off only in
+    /// tests, so test runs never show up as computers on a real network.
+    #[serde(default = "yes")]
+    pub discovery: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -55,7 +63,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             device_id: uuid::Uuid::new_v4().to_string(),
-            device_name: hostname(),
+            device_name: hop_net::device_name(),
             hop_mode: HopMode::Relative,
             wrap: false,
             paused: false,
@@ -64,6 +72,7 @@ impl Default for Config {
             modifiers: ModifierMap::default(),
             scroll: ScrollNorm::default(),
             port: 42424,
+            discovery: true,
         }
     }
 }
@@ -91,12 +100,6 @@ impl Config {
     pub fn chords(&self) -> Vec<(Chord, HotAction)> {
         expand(&self.hotkeys)
     }
-}
-
-fn hostname() -> String {
-    std::env::var("COMPUTERNAME")
-        .or_else(|_| std::env::var("HOSTNAME"))
-        .unwrap_or_else(|_| "devhop".into())
 }
 
 #[cfg(test)]

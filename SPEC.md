@@ -1,6 +1,6 @@
 # DevHop spec
 
-> Status: **Implemented.** Windows library tests pass. macOS backends are in the tree and have not been compiled on this machine. Two-computer manual checks are listed in `docs/manual-tests.md`.
+> Status: **code in tree, not working across two machines.** Unit and loopback tests pass on Windows; macOS backends have not been compiled on this machine; the Windows-to-Mac connection flaps. The diagnosis and the replanned milestones are in `PLAN.md`; the design they build toward is in `docs/ARCHITECTURE.md`. The feature list and requirements below are unchanged.
 
 ## Goal
 A Rust + Tauri desktop app for Windows and macOS that matches **CursorHop**. One keyboard and mouse control several machines on the LAN: push the cursor off a screen edge and it lands on the next machine (a software KVM). The clipboard (including files) and file drag-and-drop work across machines and across OSes. On top of that, hotkeys move the cursor between monitors on one machine.

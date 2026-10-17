@@ -11,6 +11,8 @@ pub mod macos;
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::Duration;
 
 use crossbeam_channel::Sender;
 use hop_core::{Chord, HotAction};
@@ -39,12 +41,37 @@ pub enum ClipboardItem {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum InputEvent {
-    Motion { x: i32, y: i32, dx: i32, dy: i32 },
-    Button { button: u8, down: bool },
-    Key { hid: u16, down: bool },
-    Wheel { dx: i32, dy: i32 },
+    Motion {
+        x: i32,
+        y: i32,
+        dx: i32,
+        dy: i32,
+    },
+    Button {
+        button: u8,
+        down: bool,
+    },
+    Key {
+        hid: u16,
+        down: bool,
+    },
+    Wheel {
+        dx: i32,
+        dy: i32,
+    },
     Hotkey(HotAction),
     Displays(Vec<DisplayInfo>),
+    /// `begin_file_drag` finished on the host worker thread.
+    DragFinished {
+        accepted: bool,
+    },
+    ClipboardRead {
+        items: Vec<ClipboardItem>,
+    },
+    ClipboardWritten {
+        ok: bool,
+    },
+    PermissionsChanged(PermissionStatus),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -110,6 +137,7 @@ pub struct MockState {
     pub clipboard: Vec<ClipboardItem>,
     pub drag: Vec<PathBuf>,
     pub hotkeys: Vec<(Chord, HotAction)>,
+    pub drag_delay_ms: u64,
 }
 
 impl MockHost {
@@ -125,8 +153,13 @@ impl MockHost {
                 clipboard: Vec::new(),
                 drag: Vec::new(),
                 hotkeys: Vec::new(),
+                drag_delay_ms: 0,
             })),
         }
+    }
+
+    pub fn set_drag_delay_ms(&self, ms: u64) {
+        self.inner.lock().expect("mock").drag_delay_ms = ms;
     }
 
     pub fn state(&self) -> MockState {
@@ -229,6 +262,10 @@ impl Host for MockHost {
         self.inner.lock().expect("mock").drag.clone()
     }
     fn begin_file_drag(&self, paths: &[PathBuf]) -> Result<(), String> {
+        let delay = self.inner.lock().expect("mock").drag_delay_ms;
+        if delay > 0 {
+            thread::sleep(Duration::from_millis(delay));
+        }
         self.inner.lock().expect("mock").drag = paths.to_vec();
         Ok(())
     }

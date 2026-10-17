@@ -230,7 +230,9 @@
         {#each snap.peers as peer}
           <li>
             <strong>{peer.name}</strong>
-            <span class="muted">{peer.os} {peer.online ? "online" : "offline"}</span>
+            <span class="muted">
+              {peer.os} — {peer.status}{peer.status === "unpaired" && peer.code ? ` (code ${peer.code})` : ""}
+            </span>
             {#if peer.paired}
               <button onclick={() => send({ Unpair: peer.id }).then(refresh)}>Unpair</button>
             {:else}

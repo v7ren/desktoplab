@@ -3,6 +3,7 @@
 mod clipboard;
 mod config;
 mod dnd;
+mod host_worker;
 mod hotkeys;
 mod local;
 mod log;
@@ -15,6 +16,6 @@ mod transfer;
 pub use clipboard::{cap, prepare};
 pub use config::{Config, HotkeyConfig};
 pub use local::order_of;
-pub use log::Log;
+pub use log::{conn_span, init, Conn, Log};
 pub use remote::RemoteSession;
 pub use runtime::{config_dir, spawn, start_in, Cmd, EngineHandle, PeerView, Snapshot, UiEvent};

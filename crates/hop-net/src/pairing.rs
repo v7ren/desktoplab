@@ -3,6 +3,13 @@
 
 use sha2::{Digest, Sha256};
 
+/// Code this computer shows before anyone connects. It is only this device's
+/// certificate, so the other computer can check it against the certificate
+/// it actually received.
+pub fn local_code(fingerprint: &str) -> String {
+    digits(&format!("devhop-device|{fingerprint}"))
+}
+
 /// Code both machines display. It depends only on the two fingerprints, so
 /// neither side has to send the code (a network attacker would still have to
 /// show the same number on both screens).
@@ -12,10 +19,12 @@ pub fn sas_code(fingerprint_a: &str, fingerprint_b: &str) -> String {
     } else {
         (fingerprint_b, fingerprint_a)
     };
+    digits(&format!("{left}|{right}"))
+}
+
+fn digits(material: &str) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(left.as_bytes());
-    hasher.update(b"|");
-    hasher.update(right.as_bytes());
+    hasher.update(material.as_bytes());
     let dig = hasher.finalize();
     let n = u32::from_be_bytes([dig[0], dig[1], dig[2], dig[3]]) % 1_000_000;
     format!("{n:06}")
@@ -113,5 +122,13 @@ mod tests {
         assert_eq!(sas_code("a", "b"), sas_code("b", "a"));
         assert_ne!(sas_code("a", "b"), sas_code("a", "c"));
         assert!(sas_code("a", "b").chars().all(|c| c.is_ascii_digit()));
+    }
+
+    #[test]
+    fn each_computer_has_its_own_code() {
+        assert_eq!(local_code("alpha"), local_code("alpha"));
+        assert_ne!(local_code("alpha"), local_code("beta"));
+        assert_eq!(local_code("alpha").len(), 6);
+        assert_ne!(local_code("alpha"), sas_code("alpha", "beta"));
     }
 }

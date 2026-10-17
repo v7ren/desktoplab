@@ -72,13 +72,26 @@ impl RttProbe {
         Some(rtt)
     }
 
+    pub fn p50_us(&self) -> Option<u64> {
+        self.percentile(0.50)
+    }
+
     pub fn p95_us(&self) -> Option<u64> {
+        self.percentile(0.95)
+    }
+
+    /// How many RTT samples are currently held (at most 256).
+    pub fn samples(&self) -> usize {
+        self.samples_us.len()
+    }
+
+    fn percentile(&self, p: f64) -> Option<u64> {
         if self.samples_us.is_empty() {
             return None;
         }
         let mut ordered = self.samples_us.clone();
         ordered.sort_unstable();
-        let idx = ((ordered.len() - 1) as f64 * 0.95).round() as usize;
+        let idx = ((ordered.len() - 1) as f64 * p).round() as usize;
         ordered.get(idx).copied()
     }
 }
@@ -115,5 +128,7 @@ mod tests {
         assert!(probe.echo(9, 0).is_none());
         let p95 = probe.p95_us().unwrap();
         assert!(p95 == 400 || p95 == 900);
+        assert!(probe.p50_us().is_some());
+        assert_eq!(probe.samples(), 2);
     }
 }
