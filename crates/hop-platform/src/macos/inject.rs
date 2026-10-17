@@ -16,11 +16,20 @@ fn source() -> Option<CGEventSource> {
 }
 
 pub fn rel_move(dx: i32, dy: i32) {
+    if dx == 0 && dy == 0 {
+        return;
+    }
+    // The event location is where the cursor goes. Posting at (0, 0) with only
+    // deltas parks the pointer in the corner after the first move.
+    let (x, y) = super::cursor::position().unwrap_or((0, 0));
+    let nx = x.saturating_add(dx);
+    let ny = y.saturating_add(dy);
+    super::cursor::warp(nx, ny);
     let Some(source) = source() else { return };
     let Ok(event) = CGEvent::new_mouse_event(
         source,
         CGEventType::MouseMoved,
-        CGPoint::new(0.0, 0.0),
+        CGPoint::new(nx as f64, ny as f64),
         CGMouseButton::Left,
     ) else {
         return;

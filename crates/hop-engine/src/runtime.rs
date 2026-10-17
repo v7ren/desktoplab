@@ -987,7 +987,17 @@ impl Engine {
                     self.host.set_remote(false, 0, 0);
                 }
                 ControlCommand::ParkCursor => {
-                    let (x, y) = self.host.cursor_pos().unwrap_or((0, 0));
+                    let (x, y) = self
+                        .layout
+                        .monitor(&self.session.monitor)
+                        .map(|monitor| {
+                            (
+                                monitor.bounds.x + (monitor.bounds.width as i32) / 2,
+                                monitor.bounds.y + (monitor.bounds.height as i32) / 2,
+                            )
+                        })
+                        .or_else(|| self.host.cursor_pos())
+                        .unwrap_or((0, 0));
                     self.host.set_remote(true, x, y);
                 }
                 ControlCommand::Forward { peer } => {

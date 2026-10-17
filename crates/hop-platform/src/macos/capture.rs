@@ -159,12 +159,42 @@ fn on_event(
                 return None;
             }
         }
-        CGEventType::LeftMouseDown => button(shared, 0, true),
-        CGEventType::LeftMouseUp => button(shared, 0, false),
-        CGEventType::RightMouseDown => button(shared, 1, true),
-        CGEventType::RightMouseUp => button(shared, 1, false),
-        CGEventType::OtherMouseDown => button(shared, 2, true),
-        CGEventType::OtherMouseUp => button(shared, 2, false),
+        CGEventType::LeftMouseDown => {
+            button(shared, 0, true);
+            if remote {
+                return None;
+            }
+        }
+        CGEventType::LeftMouseUp => {
+            button(shared, 0, false);
+            if remote {
+                return None;
+            }
+        }
+        CGEventType::RightMouseDown => {
+            button(shared, 1, true);
+            if remote {
+                return None;
+            }
+        }
+        CGEventType::RightMouseUp => {
+            button(shared, 1, false);
+            if remote {
+                return None;
+            }
+        }
+        CGEventType::OtherMouseDown => {
+            button(shared, 2, true);
+            if remote {
+                return None;
+            }
+        }
+        CGEventType::OtherMouseUp => {
+            button(shared, 2, false);
+            if remote {
+                return None;
+            }
+        }
         CGEventType::ScrollWheel => {
             let dy = event.get_integer_value_field(
                 core_graphics::event::EventField::SCROLL_WHEEL_EVENT_DELTA_AXIS_1,
@@ -207,22 +237,36 @@ fn on_event(
         }
         CGEventType::FlagsChanged => {
             let flags = event.get_flags();
-            shared.shift.store(
-                flags.contains(CGEventFlags::CGEventFlagShift),
-                Ordering::SeqCst,
-            );
-            shared.ctrl.store(
-                flags.contains(CGEventFlags::CGEventFlagControl),
-                Ordering::SeqCst,
-            );
-            shared.alt.store(
-                flags.contains(CGEventFlags::CGEventFlagAlternate),
-                Ordering::SeqCst,
-            );
-            shared.gui.store(
-                flags.contains(CGEventFlags::CGEventFlagCommand),
-                Ordering::SeqCst,
-            );
+            // Modifiers arrive as flag changes, not key-down events. Without
+            // this, Option and Command never leave the Mac.
+            let next = [
+                (
+                    flags.contains(CGEventFlags::CGEventFlagShift),
+                    &shared.shift,
+                    0xE1,
+                ),
+                (
+                    flags.contains(CGEventFlags::CGEventFlagControl),
+                    &shared.ctrl,
+                    0xE0,
+                ),
+                (
+                    flags.contains(CGEventFlags::CGEventFlagAlternate),
+                    &shared.alt,
+                    0xE2,
+                ),
+                (
+                    flags.contains(CGEventFlags::CGEventFlagCommand),
+                    &shared.gui,
+                    0xE3,
+                ),
+            ];
+            for (down, slot, hid) in next {
+                let was = slot.swap(down, Ordering::SeqCst);
+                if was != down && remote {
+                    let _ = shared.tx.try_send(InputEvent::Key { hid, down });
+                }
+            }
             if remote {
                 return None;
             }

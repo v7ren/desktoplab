@@ -1,9 +1,7 @@
 //! Modifier translation and scroll normalization (R9).
 //!
-//! HID usages travel on the wire. When the machines differ, Ctrl and Cmd can
-//! swap (Windows Ctrl ↔ Mac Command) and Win and Option can swap
-//! (Windows GUI ↔ Mac Alt). The two swaps touch different usages, so both
-//! can be on at once.
+//! HID usages travel on the wire. When the machines differ, Ctrl and Alt can
+//! become Command, and Win can swap with Option.
 
 use serde::{Deserialize, Serialize};
 
@@ -67,10 +65,12 @@ pub fn translate_hid(map: ModifierMap, from: HostOs, to: HostOs, hid: u16) -> u1
 }
 
 fn windows_to_mac(map: ModifierMap, hid: u16) -> u16 {
-    if map.ctrl_cmd && hid == HID_LCTRL {
+    // Ctrl and Alt both become Command. On a Windows keyboard Alt is the key
+    // people hold for Mac shortcuts, and Ctrl still maps the same way.
+    if map.ctrl_cmd && (hid == HID_LCTRL || hid == HID_LALT) {
         return HID_LGUI;
     }
-    if map.ctrl_cmd && hid == HID_RCTRL {
+    if map.ctrl_cmd && (hid == HID_RCTRL || hid == HID_RALT) {
         return HID_RGUI;
     }
     if map.win_option && hid == HID_LGUI {
@@ -132,6 +132,14 @@ mod tests {
         assert_eq!(
             translate_hid(map, HostOs::Windows, HostOs::Macos, HID_LCTRL),
             HID_LGUI
+        );
+        assert_eq!(
+            translate_hid(map, HostOs::Windows, HostOs::Macos, HID_LALT),
+            HID_LGUI
+        );
+        assert_eq!(
+            translate_hid(map, HostOs::Windows, HostOs::Macos, HID_RALT),
+            HID_RGUI
         );
     }
 

@@ -66,10 +66,21 @@ pub fn set_remote(enabled: bool, park_x: i32, park_y: i32) {
     if let Some(shared) = SHARED.get() {
         shared.park_x.store(park_x, Ordering::SeqCst);
         shared.park_y.store(park_y, Ordering::SeqCst);
+        shared.last_x.store(park_x, Ordering::SeqCst);
+        shared.last_y.store(park_y, Ordering::SeqCst);
         shared.remote.store(enabled, Ordering::SeqCst);
         if enabled {
+            // A 1px clip stops WM_MOUSEMOVE, so the other computer gets one
+            // jump and then nothing. Keep a box the pointer can move in, and
+            // put that box in the middle of the monitor (the caller parks there).
+            let span = 160;
             crate::windows::cursor::warp(park_x, park_y);
-            crate::windows::cursor::clip(Some((park_x, park_y, 1, 1)));
+            crate::windows::cursor::clip(Some((
+                park_x.saturating_sub(span),
+                park_y.saturating_sub(span),
+                span * 2,
+                span * 2,
+            )));
             crate::windows::cursor::hide();
         } else {
             crate::windows::cursor::clip(None);
@@ -156,14 +167,23 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
     let msg = wparam.0 as u32;
     let event = match msg {
         WM_MOUSEMOVE => {
-            let lx = shared.last_x.swap(x, Ordering::SeqCst);
-            let ly = shared.last_y.swap(y, Ordering::SeqCst);
-            Some(InputEvent::Motion {
-                x,
-                y,
-                dx: x - lx,
-                dy: y - ly,
-            })
+            let remote = shared.remote.load(Ordering::SeqCst);
+            let (dx, dy) = if remote {
+                (
+                    x - shared.park_x.load(Ordering::SeqCst),
+                    y - shared.park_y.load(Ordering::SeqCst),
+                )
+            } else {
+                (
+                    x - shared.last_x.swap(x, Ordering::SeqCst),
+                    y - shared.last_y.swap(y, Ordering::SeqCst),
+                )
+            };
+            if remote && dx == 0 && dy == 0 {
+                None
+            } else {
+                Some(InputEvent::Motion { x, y, dx, dy })
+            }
         }
         WM_MOUSEWHEEL => Some(InputEvent::Wheel {
             dx: 0,
