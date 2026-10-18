@@ -2,6 +2,7 @@
 
 use std::path::PathBuf;
 
+use objc2::ClassType;
 use objc2_app_kit::{NSPasteboard, NSPasteboardNameDrag};
 use objc2_foundation::NSURL;
 

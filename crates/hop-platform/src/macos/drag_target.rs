@@ -26,8 +26,8 @@ pub fn ensure_fallback(paths: &[PathBuf]) -> Result<PathBuf, String> {
             .file_name()
             .unwrap_or_else(|| std::ffi::OsStr::new("file"));
         let dest = unique(&dir, name);
-        if path != dest {
-            let _ = std::fs::copy(path, dest);
+        if path != &dest {
+            let _ = std::fs::copy(path, &dest);
         }
     }
     Ok(dir)

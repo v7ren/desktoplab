@@ -1,4 +1,5 @@
 //! Cursor warp and the remote-mode disconnect between mouse and cursor.
+//! All x/y values are in **points** (CGEvent / CGDisplay space).
 
 use core_graphics::display::CGDisplay;
 use core_graphics::event::CGEvent;

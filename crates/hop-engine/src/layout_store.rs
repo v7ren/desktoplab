@@ -229,7 +229,10 @@ pub fn apply_local_overrides(
         .filter(|m| &m.device_id == device)
     {
         if let Some(bounds) = overrides.get(&monitor.id) {
-            monitor.bounds = *bounds;
+            let phys = monitor.physical_bounds();
+            if bounds.width == phys.width && bounds.height == phys.height {
+                monitor.bounds = *bounds;
+            }
         }
     }
 }
@@ -364,5 +367,31 @@ mod tests {
         };
         let on_mac = default_place(&local_mac, &mac, "pc", remote_only);
         assert_eq!(on_mac.monitors[0].bounds.x, 100, "pc sits right of mac");
+    }
+
+    #[test]
+    fn stale_local_override_ignored_when_size_differs_from_phys() {
+        use hop_core::PhysRect;
+
+        let device = DeviceId("pc".into());
+        let mut layout = Layout {
+            devices: vec![Device {
+                id: device.clone(),
+                name: "pc".into(),
+            }],
+            monitors: vec![Monitor {
+                id: MonitorId("pc:1".into()),
+                device_id: device.clone(),
+                name: "pc:1".into(),
+                bounds: PhysRect::new(0, 0, 1440, 900),
+                phys: Some(PhysRect::new(0, 0, 1440, 900)),
+                scale: 2.0,
+            }],
+            wrap: false,
+        };
+        let overrides =
+            HashMap::from([(MonitorId("pc:1".into()), PhysRect::new(0, 0, 2880, 1800))]);
+        apply_local_overrides(&mut layout, &device, &overrides);
+        assert_eq!(layout.monitors[0].bounds, PhysRect::new(0, 0, 1440, 900));
     }
 }

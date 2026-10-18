@@ -98,6 +98,7 @@ pub struct Snapshot {
     pub clipboard_sync: bool,
     pub modifiers: ModifierMap,
     pub scroll: ScrollNorm,
+    pub scroll_reverse_incoming: bool,
     pub cross_mode: CrossMode,
     pub hotkeys: crate::config::HotkeyConfig,
     pub peers: Vec<PeerView>,
@@ -124,6 +125,7 @@ pub enum Cmd {
     SetClipboard(bool),
     SetModifiers(ModifierMap),
     SetScroll(ScrollNorm),
+    SetScrollReverseIncoming(bool),
     SetCrossMode(CrossMode),
     ConfirmPair {
         id: String,
@@ -722,6 +724,10 @@ impl Engine {
                 self.config.scroll = scroll;
                 save_config = true;
             }
+            Cmd::SetScrollReverseIncoming(reverse) => {
+                self.config.scroll_reverse_incoming = reverse;
+                save_config = true;
+            }
             Cmd::SetCrossMode(mode) => {
                 self.config.cross_mode = mode;
                 save_config = true;
@@ -948,6 +954,8 @@ impl Engine {
             }
             StreamMsg::Wheel { dx, dy } => {
                 if self.controller.is_some() {
+                    let (dx, dy) =
+                        apply_incoming_wheel(self.config.scroll_reverse_incoming, dx, dy);
                     self.host.inject_wheel(dx, dy);
                 }
             }
@@ -1051,7 +1059,8 @@ impl Engine {
     fn release_controller(&mut self) {
         self.controller = None;
         self.host.release_inputs();
-        self.host.show_cursor();
+        // macOS: re-associate mouse and cursor after remote control (see capture::set_remote).
+        self.host.set_remote(false, 0, 0);
     }
 
     fn flush_clip(&mut self, token: u64, kind: ClipKind) {
@@ -1426,6 +1435,7 @@ impl Engine {
             clipboard_sync: self.config.clipboard_sync,
             modifiers: self.config.modifiers,
             scroll: self.config.scroll,
+            scroll_reverse_incoming: self.config.scroll_reverse_incoming,
             cross_mode: self.config.cross_mode,
             hotkeys: self.config.hotkeys.clone(),
             peers,
@@ -1598,6 +1608,7 @@ fn empty_snapshot() -> Snapshot {
         clipboard_sync: true,
         modifiers: ModifierMap::default(),
         scroll: ScrollNorm::default(),
+        scroll_reverse_incoming: false,
         cross_mode: CrossMode::Layout,
         hotkeys: crate::config::HotkeyConfig::default(),
         peers: Vec::new(),
@@ -1610,6 +1621,14 @@ fn empty_snapshot() -> Snapshot {
         input_monitoring: true,
         status: "starting".into(),
         port: 42424,
+    }
+}
+
+fn apply_incoming_wheel(reverse_incoming: bool, dx: i32, dy: i32) -> (i32, i32) {
+    if reverse_incoming {
+        (-dx, -dy)
+    } else {
+        (dx, dy)
     }
 }
 
@@ -3967,6 +3986,110 @@ mod tests {
             (cy - 450).abs() > 20,
             "proportional mode should not preserve layout y=450, got y={cy}"
         );
+    }
+
+    #[test]
+    fn incoming_wheel_reverse_incoming_negates_both_axes() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = Arc::new(MockHost::new(vec![DisplayInfo {
+            id: "1".into(),
+            name: "Main".into(),
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 1080,
+            scale: 1.0,
+            primary: true,
+        }]));
+        let (mut engine, _, _) = test_engine(dir.path(), host.clone());
+        engine.config.scroll_reverse_incoming = true;
+        engine.controller = Some("peer".into());
+        engine.on_msg("peer", StreamMsg::Wheel { dx: 3, dy: -5 });
+        assert_eq!(host.state().injected_wheels, vec![(-3, 5)]);
+    }
+
+    #[test]
+    fn incoming_wheel_default_leaves_axes_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = Arc::new(MockHost::new(vec![DisplayInfo {
+            id: "1".into(),
+            name: "Main".into(),
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 1080,
+            scale: 1.0,
+            primary: true,
+        }]));
+        let (mut engine, _, _) = test_engine(dir.path(), host.clone());
+        assert!(!engine.config.scroll_reverse_incoming);
+        engine.controller = Some("peer".into());
+        engine.on_msg("peer", StreamMsg::Wheel { dx: 3, dy: -5 });
+        assert_eq!(host.state().injected_wheels, vec![(3, -5)]);
+    }
+
+    #[test]
+    fn sender_scroll_natural_flips_wheel_on_outbound_message() {
+        use hop_core::ScrollNorm;
+
+        let dir = tempfile::tempdir().unwrap();
+        let host = Arc::new(MockHost::new(vec![DisplayInfo {
+            id: "1".into(),
+            name: "Main".into(),
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 1080,
+            scale: 1.0,
+            primary: true,
+        }]));
+        let (mut engine, _, mut net_rx) = test_engine(dir.path(), host);
+        engine.config.scroll = ScrollNorm {
+            natural: true,
+            speed: 1.0,
+        };
+        engine.control.handle(ControlEvent::CrossTo {
+            peer: DeviceId("peer".into()),
+            button_held: false,
+        });
+        engine.on_wheel(8, -4);
+        let (dx, dy) = loop {
+            match net_rx.try_recv() {
+                Ok(NetCmd::SendControl {
+                    msg: StreamMsg::Wheel { dx, dy },
+                    ..
+                }) => break (dx, dy),
+                Ok(_) => continue,
+                Err(_) => panic!("no wheel message was sent"),
+            }
+        };
+        assert_eq!((dx, dy), (-8, 4));
+    }
+
+    #[test]
+    fn scroll_reverse_incoming_persists_in_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = Arc::new(MockHost::new(vec![DisplayInfo {
+            id: "1".into(),
+            name: "Main".into(),
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 1080,
+            scale: 1.0,
+            primary: true,
+        }]));
+        let (mut engine, _, _) = test_engine(dir.path(), host);
+        engine.on_cmd(Cmd::SetScrollReverseIncoming(true));
+        engine.flush_config();
+        let loaded = Config::load_or_create(dir.path()).unwrap();
+        assert!(loaded.scroll_reverse_incoming);
+    }
+
+    #[test]
+    fn apply_incoming_wheel_helper() {
+        assert_eq!(apply_incoming_wheel(true, 3, -5), (-3, 5));
+        assert_eq!(apply_incoming_wheel(false, 3, -5), (3, -5));
     }
 
     #[test]

@@ -1,4 +1,5 @@
-//! Convert between host (physical) pixel coordinates and layout (virtual) space.
+//! Convert between host coordinates and layout (virtual) space.
+//! On macOS, host x/y are **points** (same as `DisplayInfo` / CGEvent); on Windows, physical pixels.
 
 use hop_core::{DeviceId, Layout, MonitorId};
 
@@ -67,4 +68,34 @@ pub fn layout_center_phys(layout: &Layout, monitor_id: &MonitorId) -> Option<(i3
     let lx = monitor.bounds.x + (monitor.bounds.width as i32) / 2;
     let ly = monitor.bounds.y + (monitor.bounds.height as i32) / 2;
     layout_to_phys(layout, monitor_id, lx, ly)
+}
+
+#[cfg(test)]
+mod tests {
+    use hop_core::{DeviceId, Layout, Monitor, MonitorId, PhysRect};
+
+    use super::phys_to_layout;
+
+    #[test]
+    fn host_y_near_bottom_maps_inside_retina_point_sized_display() {
+        let device = DeviceId("mac".into());
+        let phys = PhysRect::new(0, 0, 1440, 900);
+        let layout = Layout {
+            devices: vec![],
+            monitors: vec![Monitor {
+                id: MonitorId("mac:1".into()),
+                device_id: device.clone(),
+                name: "Built-in".into(),
+                bounds: phys,
+                phys: Some(phys),
+                scale: 2.0,
+            }],
+            wrap: false,
+        };
+        let mapped = phys_to_layout(&layout, &device, 720, 899);
+        assert!(
+            mapped.is_some(),
+            "899pt must hit a 900pt-tall display; pixel-doubled 1800pt bounds would miss"
+        );
+    }
 }

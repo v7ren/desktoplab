@@ -44,7 +44,13 @@ pub fn set_remote(enabled: bool, park_x: i32, park_y: i32) {
         shared.park_y.store(park_y, Ordering::SeqCst);
         shared.remote.store(enabled, Ordering::SeqCst);
     }
-    crate::macos::cursor::associate(!enabled);
+    if enabled {
+        // Reset a stuck disassociated cursor, then disassociate for parked remote control.
+        crate::macos::cursor::associate(true);
+        crate::macos::cursor::associate(false);
+    } else {
+        crate::macos::cursor::associate(true);
+    }
     if enabled {
         crate::macos::cursor::warp(park_x, park_y);
         crate::macos::cursor::hide();
@@ -211,7 +217,7 @@ fn on_event(
             let code = event
                 .get_integer_value_field(core_graphics::event::EventField::KEYBOARD_EVENT_KEYCODE)
                 as u16;
-            let down = kind == CGEventType::KeyDown;
+            let down = matches!(kind, CGEventType::KeyDown);
             if let Some(hid) = from_mac(code) {
                 if down {
                     let table = shared.hotkeys.load();

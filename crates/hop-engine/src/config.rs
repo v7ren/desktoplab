@@ -19,6 +19,9 @@ pub struct Config {
     pub clipboard_sync: bool,
     pub modifiers: ModifierMap,
     pub scroll: ScrollNorm,
+    /// When another computer controls this machine, negate wheel deltas before inject.
+    #[serde(default)]
+    pub scroll_reverse_incoming: bool,
     #[serde(default = "default_cross_mode")]
     pub cross_mode: CrossMode,
     pub port: u16,
@@ -77,6 +80,7 @@ impl Default for Config {
             clipboard_sync: true,
             modifiers: ModifierMap::default(),
             scroll: ScrollNorm::default(),
+            scroll_reverse_incoming: false,
             cross_mode: CrossMode::Layout,
             port: 42424,
             discovery: true,
@@ -131,6 +135,27 @@ mod tests {
         assert_eq!(loaded.device_id, first.device_id);
         assert_eq!(loaded.hotkeys.panic, "ctrl+alt+f12");
         assert!(!loaded.chords().is_empty());
+    }
+
+    #[test]
+    fn scroll_reverse_incoming_defaults_when_missing_from_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        Config::default().save(dir.path()).unwrap();
+        let path = dir.path().join("config.toml");
+        let text = std::fs::read_to_string(&path)
+            .unwrap()
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("scroll_reverse_incoming"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!text.contains("scroll_reverse_incoming"));
+        std::fs::write(&path, &text).unwrap();
+        let loaded = Config::load_or_create(dir.path()).unwrap();
+        assert!(!loaded.scroll_reverse_incoming);
+
+        std::fs::write(&path, format!("scroll_reverse_incoming = true\n{}", text)).unwrap();
+        let loaded = Config::load_or_create(dir.path()).unwrap();
+        assert!(loaded.scroll_reverse_incoming);
     }
 
     /// The old `ctrl_cmd` key still loads into the renamed `alt_cmd` field, so

@@ -13,6 +13,35 @@
   let autostart = $state(false);
   let error = $state("");
   const CANVAS_MARGIN_LAYOUT = 240;
+  const SNAP_LAYOUT_GENTLE = 96;
+  const SNAP_STORAGE_KEY = "devhop.snap";
+
+  let snapToEdges = $state(false);
+
+  function loadSnapPref(): boolean {
+    try {
+      return localStorage.getItem(SNAP_STORAGE_KEY) === "1";
+    } catch {
+      return false;
+    }
+  }
+
+  function saveSnapPref(on: boolean) {
+    try {
+      localStorage.setItem(SNAP_STORAGE_KEY, on ? "1" : "0");
+    } catch {
+      /* ignore */
+    }
+  }
+
+  function toggleSnapToEdges() {
+    snapToEdges = !snapToEdges;
+    saveSnapPref(snapToEdges);
+  }
+
+  function snapActiveForDrag(shiftKey: boolean): boolean {
+    return shiftKey ? !snapToEdges : snapToEdges;
+  }
 
   let drag = $state<{
     id: string;
@@ -52,6 +81,7 @@
   }
 
   onMount(() => {
+    snapToEdges = loadSnapPref();
     void refresh();
     const stop = subscribe(() => {
       void refresh();
@@ -133,8 +163,6 @@
     return slash >= 0 ? name.slice(slash + 1) : name;
   }
 
-  const SNAP_LAYOUT = 240;
-
   function snapRect(
     nx: number,
     ny: number,
@@ -142,6 +170,7 @@
     h: number,
     monitors: Snapshot["monitors"],
     skip: (other: Snapshot["monitors"][number]) => boolean,
+    threshold: number,
   ): { x: number; y: number } {
     for (const other of monitors) {
       if (skip(other)) continue;
@@ -153,16 +182,16 @@
       let sB = ny + h;
       const sCx = nx + w / 2;
       const sCy = ny + h / 2;
-      if (Math.abs(nx - oR) < SNAP_LAYOUT) nx = oR;
-      if (Math.abs(sR - other.x) < SNAP_LAYOUT) nx = other.x - w;
-      if (Math.abs(ny - oB) < SNAP_LAYOUT) ny = oB;
-      if (Math.abs(sB - other.y) < SNAP_LAYOUT) ny = other.y - h;
-      if (Math.abs(ny - other.y) < SNAP_LAYOUT) ny = other.y;
-      if (Math.abs(sCy - oCy) < SNAP_LAYOUT) ny = oCy - h / 2;
-      if (Math.abs(sB - oB) < SNAP_LAYOUT) ny = oB - h;
-      if (Math.abs(nx - other.x) < SNAP_LAYOUT) nx = other.x;
-      if (Math.abs(sCx - oCx) < SNAP_LAYOUT) nx = oCx - w / 2;
-      if (Math.abs(sR - oR) < SNAP_LAYOUT) nx = oR - w;
+      if (Math.abs(nx - oR) < threshold) nx = oR;
+      if (Math.abs(sR - other.x) < threshold) nx = other.x - w;
+      if (Math.abs(ny - oB) < threshold) ny = oB;
+      if (Math.abs(sB - other.y) < threshold) ny = other.y - h;
+      if (Math.abs(ny - other.y) < threshold) ny = other.y;
+      if (Math.abs(sCy - oCy) < threshold) ny = oCy - h / 2;
+      if (Math.abs(sB - oB) < threshold) ny = oB - h;
+      if (Math.abs(nx - other.x) < threshold) nx = other.x;
+      if (Math.abs(sCx - oCx) < threshold) nx = oCx - w / 2;
+      if (Math.abs(sR - oR) < threshold) nx = oR - w;
       sR = nx + w;
       sB = ny + h;
     }
@@ -176,11 +205,20 @@
     monitors: Snapshot["monitors"],
     shiftKey: boolean,
   ): { x: number; y: number } {
-    if (shiftKey) return { x, y };
+    if (!snapActiveForDrag(shiftKey)) return { x, y };
+    const threshold = SNAP_LAYOUT_GENTLE;
     const self = monitors.find((item) => item.id === dragState.id);
     if (!self) return { x, y };
     if (!dragState.block) {
-      const snapped = snapRect(x, y, self.width, self.height, monitors, (other) => other.id === dragState.id);
+      const snapped = snapRect(
+        x,
+        y,
+        self.width,
+        self.height,
+        monitors,
+        (other) => other.id === dragState.id,
+        threshold,
+      );
       return { x: Math.round(snapped.x), y: Math.round(snapped.y) };
     }
     const dx = x - dragState.originX;
@@ -194,6 +232,7 @@
       dragState.blockH,
       monitors,
       (other) => other.device_id === dragState.deviceId,
+      threshold,
     );
     const snapDx = snapped.x - dragState.blockMinX;
     const snapDy = snapped.y - dragState.blockMinY;
@@ -274,6 +313,51 @@
     };
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", up);
+  }
+
+  const nudgeState = new Map<
+    string,
+    { latestX: number; latestY: number; block: boolean; throttle: ReturnType<typeof setTimeout> | null }
+  >();
+
+  function onMonitorKeydown(event: KeyboardEvent, id: string) {
+    if (!snap) return;
+    const key = event.key;
+    if (key !== "ArrowLeft" && key !== "ArrowRight" && key !== "ArrowUp" && key !== "ArrowDown") {
+      return;
+    }
+    event.preventDefault();
+    const monitor = snap.monitors.find((item) => item.id === id);
+    if (!monitor) return;
+    const step = event.shiftKey ? 10 : 1;
+    let dx = 0;
+    let dy = 0;
+    if (key === "ArrowLeft") dx = -step;
+    if (key === "ArrowRight") dx = step;
+    if (key === "ArrowUp") dy = -step;
+    if (key === "ArrowDown") dy = step;
+    const block = event.altKey;
+    let entry = nudgeState.get(id);
+    if (!entry) {
+      entry = {
+        latestX: monitor.x + dx,
+        latestY: monitor.y + dy,
+        block,
+        throttle: null,
+      };
+      nudgeState.set(id, entry);
+      void send({ MoveMonitor: { id, x: entry.latestX, y: entry.latestY, block: entry.block } });
+    } else {
+      entry.latestX += dx;
+      entry.latestY += dy;
+      entry.block = block;
+    }
+    if (entry.throttle) return;
+    entry.throttle = setTimeout(() => {
+      entry!.throttle = null;
+      void send({ MoveMonitor: { id, x: entry!.latestX, y: entry!.latestY, block: entry!.block } });
+      nudgeState.delete(id);
+    }, 80);
   }
 </script>
 
@@ -388,14 +472,55 @@
           <option value="proportional">Stretch to fit</option>
         </select>
       </label>
-      <button
-        type="button"
-        class="reset-layout"
-        title="Put the computers back in the default arrangement"
-        onclick={() => send("ResetLayout").then(refresh)}
-      >
-        Reset layout
-      </button>
+      <div class="card scrolling-card">
+        <h3>Scrolling</h3>
+        <label class="check">
+          <input
+            type="checkbox"
+            checked={snap.scroll_reverse_incoming}
+            onchange={(e) => send({ SetScrollReverseIncoming: e.currentTarget.checked }).then(refresh)}
+          />
+          Reverse scroll direction on this computer (when another computer controls it)
+        </label>
+        <label class="check">
+          <input
+            type="checkbox"
+            checked={snap.scroll.natural}
+            onchange={(e) =>
+              send({ SetScroll: { ...snap.scroll, natural: e.currentTarget.checked } }).then(refresh)}
+          />
+          Reverse scroll direction when I control another computer
+        </label>
+        <label>Scroll speed (when I control another computer)
+          <input
+            type="number"
+            min="0.1"
+            step="0.1"
+            value={snap.scroll.speed}
+            onchange={(e) =>
+              send({ SetScroll: { ...snap.scroll, speed: Number(e.currentTarget.value) } }).then(refresh)}
+          />
+        </label>
+      </div>
+      <div class="layout-actions">
+        <button
+          type="button"
+          class="reset-layout"
+          title="Put the computers back in the default arrangement"
+          onclick={() => send("ResetLayout").then(refresh)}
+        >
+          Reset layout
+        </button>
+        <button
+          type="button"
+          class="snap-toggle"
+          class:active={snapToEdges}
+          aria-pressed={snapToEdges}
+          onclick={toggleSnapToEdges}
+        >
+          Snap to edges: {snapToEdges ? "On" : "Off"}
+        </button>
+      </div>
       <p class="layout-legend muted" aria-label="Monitor colours">
         <span class="legend-item"><span class="swatch swatch-local" aria-hidden="true"></span> This computer</span>
         <span class="legend-item"><span class="swatch swatch-remote" aria-hidden="true"></span> Other computer</span>
@@ -416,13 +541,14 @@
             class:remote={isRemote}
             style="left:{box.left}px;top:{box.top}px;width:{box.width}px;height:{box.height}px"
             onpointerdown={(event) => onMonitorPointer(event, monitor.id)}
+            onkeydown={(event) => onMonitorKeydown(event, monitor.id)}
           >
             {monitorLabel(monitor.name)}
           </button>
         {/each}
       </div>
       <p class="muted">
-        Drag a display to arrange it. Hold Alt to move the whole computer. Hold Shift to turn off snapping.
+        Drag a display to arrange it. Hold Alt to move the whole computer. Hold Shift to toggle snapping for one drag.
       </p>
     {:else if page === "Hotkeys" && snap}
       <h2>Hotkeys</h2>
@@ -456,10 +582,6 @@
       <label class="check"><input type="checkbox" checked={snap.clipboard_sync} onchange={(e) => send({ SetClipboard: e.currentTarget.checked }).then(refresh)} /> Sync clipboard on crossing</label>
       <label class="check"><input type="checkbox" checked={snap.modifiers.alt_cmd} onchange={(e) => send({ SetModifiers: { ...snap.modifiers, alt_cmd: e.currentTarget.checked } }).then(refresh)} /> Windows Alt ↔ Mac Command</label>
       <label class="check"><input type="checkbox" checked={snap.modifiers.win_option} onchange={(e) => send({ SetModifiers: { ...snap.modifiers, win_option: e.currentTarget.checked } }).then(refresh)} /> Windows Win ↔ Mac Option</label>
-      <label class="check"><input type="checkbox" checked={snap.scroll.natural} onchange={(e) => send({ SetScroll: { ...snap.scroll, natural: e.currentTarget.checked } }).then(refresh)} /> Natural scrolling</label>
-      <label>Scroll speed
-        <input type="number" min="0.1" step="0.1" value={snap.scroll.speed} onchange={(e) => send({ SetScroll: { ...snap.scroll, speed: Number(e.currentTarget.value) } }).then(refresh)} />
-      </label>
     {:else if page === "Transfers" && snap}
       <h2>Transfers</h2>
       {#if snap.transfers.length === 0}
@@ -518,9 +640,25 @@
   .status { margin-top: 24px; color: #9aa0ab; font-size: 13px; }
   .error { color: #ff8d8d; }
   .card { background: #181a1f; padding: 16px; border-radius: 12px; margin-bottom: 16px; }
+  .scrolling-card h3 { margin: 0 0 12px; font-size: 1rem; font-weight: 600; }
+  .scrolling-card label { display: block; margin-bottom: 10px; }
   .code { font-size: 32px; letter-spacing: 6px; margin: 0; }
   input[aria-label="Pairing code"] { font-size: 28px; letter-spacing: 6px; max-width: 220px; }
-  .reset-layout { margin-top: 12px; width: fit-content; }
+  .layout-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin-top: 12px;
+    align-items: center;
+  }
+  .reset-layout,
+  .snap-toggle {
+    width: fit-content;
+  }
+  .snap-toggle.active {
+    background: #3d6df2;
+    color: #fff;
+  }
   .canvas { position: relative; height: 420px; background: #181a1f; border-radius: 12px; overflow: auto; }
   .layout-legend {
     display: flex;

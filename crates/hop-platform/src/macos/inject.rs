@@ -62,11 +62,12 @@ pub fn rel_move(dx: i32, dy: i32) {
     let Some((x, y)) = cursor_xy() else { return };
     let nx = x.saturating_add(dx);
     let ny = y.saturating_add(dy);
-    super::cursor::warp(nx, ny);
+    let (cx, cy) = super::display::clamp_point_to_display(x, y, nx, ny);
+    super::cursor::warp(cx, cy);
     let Some(source) = source() else { return };
     let (kind, mouse) = drag_event();
     let Ok(event) =
-        CGEvent::new_mouse_event(source, kind, CGPoint::new(nx as f64, ny as f64), mouse)
+        CGEvent::new_mouse_event(source, kind, CGPoint::new(cx as f64, cy as f64), mouse)
     else {
         return;
     };

@@ -3,6 +3,7 @@
 
 pub mod keys_util;
 pub mod pointer;
+pub mod units;
 
 #[cfg(target_os = "windows")]
 pub mod windows;
@@ -19,6 +20,8 @@ use crossbeam_channel::Sender;
 use hop_core::{Chord, HotAction};
 use serde::{Deserialize, Serialize};
 
+/// Monitor bounds in the same coordinate space as [`Host::cursor_pos`] / [`Host::warp`].
+/// On Windows that is physical pixels; on macOS it is **points** (see `units`).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct DisplayInfo {
     pub id: String,
@@ -27,6 +30,7 @@ pub struct DisplayInfo {
     pub y: i32,
     pub width: u32,
     pub height: u32,
+    /// Pixels per point (macOS) or dpi/96 (Windows); metadata, not applied to bounds.
     pub scale: f64,
     pub primary: bool,
 }
@@ -135,6 +139,7 @@ pub struct MockState {
     pub remote: bool,
     pub injected_keys: Vec<(u16, bool)>,
     pub injected_buttons: Vec<(u8, bool)>,
+    pub injected_wheels: Vec<(i32, i32)>,
     pub clipboard: Vec<ClipboardItem>,
     pub drag: Vec<PathBuf>,
     pub hotkeys: Vec<(Chord, HotAction)>,
@@ -151,6 +156,7 @@ impl MockHost {
                 remote: false,
                 injected_keys: Vec::new(),
                 injected_buttons: Vec::new(),
+                injected_wheels: Vec::new(),
                 clipboard: Vec::new(),
                 drag: Vec::new(),
                 hotkeys: Vec::new(),
@@ -215,7 +221,13 @@ impl Host for MockHost {
             .injected_keys
             .push((hid, down));
     }
-    fn inject_wheel(&self, _dx: i32, _dy: i32) {}
+    fn inject_wheel(&self, dx: i32, dy: i32) {
+        self.inner
+            .lock()
+            .expect("mock")
+            .injected_wheels
+            .push((dx, dy));
+    }
     fn release_inputs(&self) {
         let mut g = self.inner.lock().expect("mock");
         let keys: Vec<u16> = g

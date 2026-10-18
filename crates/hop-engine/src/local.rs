@@ -2,8 +2,8 @@
 //!
 //! Geometry here is virtual layout space. The engine converts host (physical) pointer
 //! positions into this space before calling `on_motion`, and converts warps back to
-//! physical pixels. OS display arrangement still governs everyday movement on the
-//! local machine; virtual bounds govern DevHop crossing and controlled hops.
+//! host coordinates (physical pixels on Windows, **points** on macOS). Virtual bounds
+//! govern DevHop crossing and controlled hops.
 
 use std::collections::HashSet;
 
@@ -334,6 +334,62 @@ mod tests {
             ),
             MotionEffect::Stay
         );
+    }
+
+    #[test]
+    fn bottom_edge_warps_to_monitor_below_on_point_sized_display() {
+        let layout = desk(
+            vec![
+                mon("a", "local", 0, 0, 1440, 900),
+                mon("b", "local", 0, 900, 1440, 900),
+            ],
+            false,
+        );
+        let mut session = session();
+        let effect = on_motion(
+            &layout,
+            &mut session,
+            720,
+            899,
+            0,
+            5,
+            false,
+            &HashSet::new(),
+            CrossMode::Layout,
+        );
+        match effect {
+            MotionEffect::Warp { monitor, .. } => assert_eq!(monitor.0, "b"),
+            other => panic!("expected warp to monitor below, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bottom_edge_handoff_to_online_peer_below_point_sized_display() {
+        let layout = desk(
+            vec![
+                mon("a", "local", 0, 0, 1440, 900),
+                mon("p", "laptop", 0, 900, 1440, 900),
+            ],
+            false,
+        );
+        let mut online = HashSet::new();
+        online.insert(DeviceId("laptop".into()));
+        let mut session = session();
+        let effect = on_motion(
+            &layout,
+            &mut session,
+            720,
+            899,
+            0,
+            5,
+            false,
+            &online,
+            CrossMode::Layout,
+        );
+        match effect {
+            MotionEffect::Handoff { peer, .. } => assert_eq!(peer.0, "laptop"),
+            other => panic!("expected handoff to peer below, got {other:?}"),
+        }
     }
 
     #[test]
