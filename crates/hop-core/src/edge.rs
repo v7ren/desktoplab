@@ -311,6 +311,7 @@ mod tests {
             device_id: DeviceId(dev.into()),
             name: id.into(),
             bounds: PhysRect::new(x, y, w, h),
+            phys: None,
             scale,
         }
     }

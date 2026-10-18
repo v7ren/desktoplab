@@ -22,11 +22,13 @@ use crate::config::Config;
 use crate::dnd;
 use crate::host_worker::{spawn as spawn_host_worker, HostJob};
 use crate::layout_store::{
-    align_incoming_layout, apply_saved, clear_all, default_place, device_fragment_at_origin,
-    load_all, merge_remote_into, received_includes_local, remote_fragment, save_peer,
+    adopt_local_virtual_bounds, align_incoming_layout, apply_local_overrides, apply_saved,
+    clear_all, default_place, device_fragment_at_arrangement, load_all, load_local_overrides,
+    merge_remote_into, received_includes_local, remote_fragment, save_local_overrides, save_peer,
 };
 use crate::local::{on_hotkey, on_motion, LocalSession, MotionEffect};
 use crate::log::{self, Log};
+use crate::monitor_coords::{layout_center_phys, layout_point_to_phys, phys_point_to_layout};
 use crate::netloop::{self, NetCmd, NetEvt};
 use crate::peers::PeerStore;
 use crate::remote::RemoteSession;
@@ -136,7 +138,7 @@ pub enum Cmd {
         x: i32,
         y: i32,
         #[serde(default)]
-        single: bool,
+        block: bool,
     },
     CancelTransfer(u64),
     OpenTransfer(u64),
@@ -210,7 +212,9 @@ fn engine_main(
     let identity = Identity::load_or_create(&dir).ok();
     let displays = host.list_displays();
     let device = DeviceId(config.device_id.clone());
-    let layout = layout_from(&device, &config.device_name, &displays, config.wrap);
+    let mut layout = layout_from(&device, &config.device_name, &displays, config.wrap);
+    let local_overrides = load_local_overrides(&dir);
+    apply_local_overrides(&mut layout, &device, &local_overrides);
     let primary = layout
         .monitors
         .first()
@@ -516,12 +520,15 @@ impl Engine {
         if self.controller.is_some() {
             return;
         }
+        let device = self.session.device.clone();
+        let hint = self.session.monitor.clone();
+        let (lx, ly) = phys_point_to_layout(&self.layout, &device, x, y, &hint);
         let online = self.crossable();
         match on_motion(
             &self.layout,
             &mut self.session,
-            x,
-            y,
+            lx,
+            ly,
             dx,
             dy,
             self.config.paused,
@@ -530,8 +537,9 @@ impl Engine {
         ) {
             MotionEffect::Stay => {}
             MotionEffect::Warp { x, y, monitor } => {
+                let (px, py) = layout_point_to_phys(&self.layout, &monitor, x, y);
                 self.session.monitor = monitor;
-                self.host.warp(x, y);
+                self.host.warp(px, py);
             }
             MotionEffect::Handoff {
                 peer,
@@ -559,12 +567,15 @@ impl Engine {
         let Some((x, y)) = self.host.cursor_pos() else {
             return;
         };
+        let device = self.session.device.clone();
+        let hint = self.session.monitor.clone();
+        let (lx, ly) = phys_point_to_layout(&self.layout, &device, x, y, &hint);
         let online = self.crossable();
         match on_motion(
             &self.layout,
             &mut self.session,
-            x,
-            y,
+            lx,
+            ly,
             dx,
             dy,
             false,
@@ -573,8 +584,9 @@ impl Engine {
         ) {
             MotionEffect::Stay => {}
             MotionEffect::Warp { x, y, monitor } => {
+                let (px, py) = layout_point_to_phys(&self.layout, &monitor, x, y);
                 self.session.monitor = monitor;
-                self.host.warp(x, y);
+                self.host.warp(px, py);
             }
             MotionEffect::Handoff {
                 peer,
@@ -660,11 +672,13 @@ impl Engine {
         };
         match effect {
             crate::local::HotEffect::Warp { x, y, monitor } => {
+                let (px, py) = layout_point_to_phys(&self.layout, &monitor, x, y);
                 self.session.monitor = monitor;
-                self.host.warp(x, y);
+                self.host.warp(px, py);
             }
             crate::local::HotEffect::FindCursor { x, y } => {
-                let _ = self.ui.send(UiEvent::FindCursor { x, y });
+                let (px, py) = layout_point_to_phys(&self.layout, &self.session.monitor, x, y);
+                let _ = self.ui.send(UiEvent::FindCursor { x: px, y: py });
             }
             crate::local::HotEffect::Lock(locked) => {
                 self.session.locked = locked;
@@ -741,7 +755,7 @@ impl Engine {
                     self.status = format!("could not parse {text}");
                 }
             }
-            Cmd::MoveMonitor { id, x, y, single } => self.move_monitor(&id, x, y, single),
+            Cmd::MoveMonitor { id, x, y, block } => self.move_monitor(&id, x, y, block),
             Cmd::ResetLayout => self.reset_layout(),
             Cmd::CancelTransfer(id) => {
                 if self.transfers.cancel_flag(id) {
@@ -956,11 +970,13 @@ impl Engine {
                 }
                 if let Some(monitor) = self.layout.monitor(&MonitorId(monitor_id.clone())).cloned()
                 {
-                    let (x, y) = denormalize(monitor.bounds, nx, ny);
+                    let (lx, ly) = denormalize(monitor.bounds, nx, ny);
                     self.session.monitor = MonitorId(monitor_id);
                     self.session.nx = nx;
                     self.session.ny = ny;
-                    self.host.warp(x, y);
+                    let (px, py) =
+                        layout_point_to_phys(&self.layout, &self.session.monitor, lx, ly);
+                    self.host.warp(px, py);
                 }
             }
             StreamMsg::ClipboardAnnounce { token, items: _ } => {
@@ -1066,15 +1082,7 @@ impl Engine {
                     self.host.set_remote(false, 0, 0);
                 }
                 ControlCommand::ParkCursor => {
-                    let (x, y) = self
-                        .layout
-                        .monitor(&self.session.monitor)
-                        .map(|monitor| {
-                            (
-                                monitor.bounds.x + (monitor.bounds.width as i32) / 2,
-                                monitor.bounds.y + (monitor.bounds.height as i32) / 2,
-                            )
-                        })
+                    let (x, y) = layout_center_phys(&self.layout, &self.session.monitor)
                         .or_else(|| self.host.cursor_pos())
                         .unwrap_or((0, 0));
                     self.host.set_remote(true, x, y);
@@ -1134,8 +1142,11 @@ impl Engine {
         };
         let device = self.session.device.clone();
         let incoming = if received_includes_local(&received, &device) {
-            align_incoming_layout(&received, &self.layout, &device)
-                .unwrap_or_else(|| default_place(&self.layout, &device, from_peer, received))
+            let aligned = align_incoming_layout(&received, &self.layout, &device)
+                .unwrap_or_else(|| default_place(&self.layout, &device, from_peer, received));
+            adopt_local_virtual_bounds(&mut self.layout, &aligned, &device);
+            let _ = save_local_overrides(&self.dir, &self.layout, &device);
+            aligned
         } else if let Some(saved) = self.peer_layouts.get(from_peer).cloned() {
             saved
         } else {
@@ -1180,13 +1191,18 @@ impl Engine {
             .collect();
         let fragments: Vec<(String, Layout)> = remote_ids
             .iter()
-            .map(|id| (id.0.clone(), device_fragment_at_origin(&self.layout, id)))
+            .map(|id| {
+                (
+                    id.0.clone(),
+                    device_fragment_at_arrangement(&self.layout, id),
+                )
+            })
             .filter(|(_, layout)| !layout.monitors.is_empty())
             .collect();
         let _ = clear_all(&self.dir);
         self.peer_layouts.clear();
         let displays = self.host.list_displays();
-        self.refresh_local_monitors(&displays);
+        self.refresh_local_monitors(&displays, true);
         for (peer_id, fragment) in fragments {
             let placed = default_place(&self.layout, &device, &peer_id, fragment);
             merge_remote_into(&mut self.layout, &device, placed);
@@ -1198,7 +1214,7 @@ impl Engine {
         self.mark_snapshot_dirty();
     }
 
-    fn move_monitor(&mut self, id: &str, x: i32, y: i32, single: bool) {
+    fn move_monitor(&mut self, id: &str, x: i32, y: i32, block: bool) {
         let device = self.session.device.clone();
         let Some(monitor) = self.layout.monitors.iter().find(|m| m.id.0 == id).cloned() else {
             return;
@@ -1212,27 +1228,29 @@ impl Engine {
         if dx == 0 && dy == 0 {
             return;
         }
-        if single {
-            if let Some(remote) = self.layout.monitors.iter_mut().find(|m| m.id.0 == id) {
-                remote.bounds.x = x;
-                remote.bounds.y = y;
-            }
-        } else {
+        if block {
             for remote in self.layout.monitors.iter_mut() {
                 if remote.device_id == peer_device {
                     remote.bounds.x = remote.bounds.x.saturating_add(dx);
                     remote.bounds.y = remote.bounds.y.saturating_add(dy);
                 }
             }
+        } else if let Some(remote) = self.layout.monitors.iter_mut().find(|m| m.id.0 == id) {
+            remote.bounds.x = x;
+            remote.bounds.y = y;
         }
         self.persist_peer_layouts();
         self.broadcast_layout();
     }
 
-    fn refresh_local_monitors(&mut self, displays: &[DisplayInfo]) {
+    fn refresh_local_monitors(&mut self, displays: &[DisplayInfo], clear_virtual: bool) {
         let device = self.session.device.clone();
         let name = self.config.device_name.clone();
-        let fresh = layout_from(&device, &name, displays, self.layout.wrap);
+        let mut fresh = layout_from(&device, &name, displays, self.layout.wrap);
+        if !clear_virtual {
+            let overrides = load_local_overrides(&self.dir);
+            apply_local_overrides(&mut fresh, &device, &overrides);
+        }
         self.layout.monitors.retain(|m| m.device_id != device);
         self.layout.devices.retain(|d| d.id != device);
         self.layout.devices.extend(fresh.devices);
@@ -1240,7 +1258,7 @@ impl Engine {
     }
 
     fn refresh_displays(&mut self, displays: &[DisplayInfo]) {
-        self.refresh_local_monitors(displays);
+        self.refresh_local_monitors(displays, false);
         if !self.online.is_empty() {
             self.broadcast_layout();
         }
@@ -1460,12 +1478,16 @@ fn layout_from(device: &DeviceId, name: &str, displays: &[DisplayInfo], wrap: bo
         }],
         monitors: displays
             .iter()
-            .map(|display| Monitor {
-                id: MonitorId(format!("{}:{}", device.0, display.id)),
-                device_id: device.clone(),
-                name: display.name.clone(),
-                bounds: PhysRect::new(display.x, display.y, display.width, display.height),
-                scale: display.scale,
+            .map(|display| {
+                let rect = PhysRect::new(display.x, display.y, display.width, display.height);
+                Monitor {
+                    id: MonitorId(format!("{}:{}", device.0, display.id)),
+                    device_id: device.clone(),
+                    name: display.name.clone(),
+                    bounds: rect,
+                    phys: Some(rect),
+                    scale: display.scale,
+                }
             })
             .collect(),
         wrap,
@@ -1807,7 +1829,9 @@ mod tests {
         let config = Config::load_or_create(dir).unwrap_or_default();
         let device = DeviceId(config.device_id.clone());
         let displays = host.list_displays();
-        let layout = layout_from(&device, &config.device_name, &displays, config.wrap);
+        let mut layout = layout_from(&device, &config.device_name, &displays, config.wrap);
+        let local_overrides = load_local_overrides(dir);
+        apply_local_overrides(&mut layout, &device, &local_overrides);
         let primary = layout
             .monitors
             .first()
@@ -2027,7 +2051,7 @@ mod tests {
                 id: monitor_id.clone(),
                 x: i * 10,
                 y: 0,
-                single: false,
+                block: false,
             });
             thread::sleep(Duration::from_millis(5));
         }
@@ -2226,6 +2250,7 @@ mod tests {
             device_id: DeviceId(dev.into()),
             name: id.into(),
             bounds: PhysRect::new(x, y, w, h),
+            phys: None,
             scale: 1.0,
         }
     }
@@ -2758,6 +2783,103 @@ mod tests {
             .bounds
     }
 
+    fn broadcast_vertical_mac_on_pc(pair: &mut PeerPair) {
+        let pc_mon = pair
+            .a
+            .layout
+            .monitors
+            .iter()
+            .find(|m| m.device_id.0 == "a")
+            .unwrap()
+            .bounds;
+        let b1_top = 200;
+        let b1_h = monitor_bounds(&pair.a.layout, "b", "1").height as i32;
+        let b2_top = b1_top + b1_h + 40;
+        if let Some(remote) = pair.a.layout.monitors.iter_mut().find(|m| m.id.0 == "b:1") {
+            remote.bounds.x = pc_mon.right();
+            remote.bounds.y = b1_top;
+        }
+        if let Some(remote) = pair.a.layout.monitors.iter_mut().find(|m| m.id.0 == "b:2") {
+            remote.bounds.x = pc_mon.right();
+            remote.bounds.y = b2_top;
+        }
+        pair.a.persist_peer_layouts();
+        pair.a.broadcast_layout();
+        pump(pair);
+    }
+
+    fn assert_mac_vertical_geometry_matches_across_peers(pair: &PeerPair) {
+        let a1 = monitor_bounds(&pair.a.layout, "b", "1");
+        let a2 = monitor_bounds(&pair.a.layout, "b", "2");
+        let b1 = monitor_bounds(&pair.b.layout, "b", "1");
+        let b2 = monitor_bounds(&pair.b.layout, "b", "2");
+        assert_eq!(a2.x - a1.x, b2.x - b1.x);
+        assert_eq!(a2.y - a1.y, b2.y - b1.y);
+        let pc_a = pair
+            .a
+            .layout
+            .monitors
+            .iter()
+            .find(|m| m.device_id.0 == "a")
+            .unwrap()
+            .bounds;
+        let pc_b = pair
+            .b
+            .layout
+            .monitors
+            .iter()
+            .find(|m| m.device_id.0 == "a")
+            .unwrap()
+            .bounds;
+        assert_eq!(pc_a.x - a1.x, pc_b.x - b1.x);
+        assert_eq!(pc_a.y - a1.y, pc_b.y - b1.y);
+    }
+
+    fn expected_mac_physical_y(pair: &PeerPair, display_suffix: &str, layout_y: i32) -> i32 {
+        let monitor = pair
+            .a
+            .layout
+            .monitor(&MonitorId(format!("b:{display_suffix}")))
+            .unwrap();
+        let phys = monitor.physical_bounds();
+        phys.y + (layout_y - monitor.bounds.y)
+    }
+
+    fn expected_mac_physical_y_after_cross(
+        pair: &PeerPair,
+        cross_mode: CrossMode,
+        layout_y: i32,
+        pc_right: i32,
+    ) -> i32 {
+        let arrival = hop_core::cross_with_mode(
+            &pair.a.layout,
+            &MonitorId("a:1".into()),
+            pc_right + 1,
+            layout_y,
+            cross_mode,
+        )
+        .expect("cross from PC");
+        let monitor = pair
+            .a
+            .layout
+            .monitor(&arrival.monitor)
+            .expect("target on Mac in A frame");
+        let phys = monitor.physical_bounds();
+        match cross_mode {
+            CrossMode::Layout => phys.y + (layout_y - monitor.bounds.y),
+            CrossMode::Proportional => {
+                let h = phys.height.max(1) as i32;
+                phys.y + (arrival.t * (h - 1) as f64).round() as i32
+            }
+        }
+    }
+
+    fn local_layout_file_exists(dir: &std::path::Path) -> bool {
+        crate::layout_store::layouts_dir(dir)
+            .join("_local.json")
+            .is_file()
+    }
+
     /// (1) Layouts are mirror images after the real layout broadcast path.
     #[test]
     fn exchanged_layouts_are_mirror_images() {
@@ -2931,7 +3053,7 @@ mod tests {
             id: mac_on_a,
             x: 1920,
             y: 120,
-            single: false,
+            block: false,
         });
         pump(&mut pair);
         assert_eq!(
@@ -3114,7 +3236,7 @@ mod tests {
             id: b_mon,
             x: 1920,
             y: 200,
-            single: false,
+            block: false,
         });
         pump(&mut pair);
         pair.a.on_cmd(Cmd::ResetLayout);
@@ -3172,7 +3294,7 @@ mod tests {
             id: b_mon,
             x: 1920,
             y: 200,
-            single: false,
+            block: false,
         });
         pump(&mut pair);
         pair.a.online.remove("b");
@@ -3314,7 +3436,7 @@ mod tests {
             id: "b:2".into(),
             x: m2.x,
             y: m2.y + 80,
-            single: false,
+            block: true,
         });
         pump(&mut pair);
 
@@ -3344,7 +3466,7 @@ mod tests {
     }
 
     #[test]
-    fn remote_single_move_only_moves_one_monitor() {
+    fn remote_default_move_only_moves_one_monitor() {
         let mut pair =
             pair_via_layout_exchange(vec![display("1", 0, 0, 1920, 1080)], mac_dual_displays());
         let m1 = monitor_bounds(&pair.a.layout, "b", "1");
@@ -3354,7 +3476,7 @@ mod tests {
             id: "b:2".into(),
             x: m2.x + 120,
             y: m2.y + 40,
-            single: true,
+            block: false,
         });
         pump(&mut pair);
 
@@ -3376,7 +3498,7 @@ mod tests {
             id: "a:1".into(),
             x: 10_000,
             y: 10_000,
-            single: false,
+            block: false,
         });
         assert_eq!(pair.a.layout, before);
         assert_eq!(saved_layout_file_count(pair._a_dir.path()), files);
@@ -3384,7 +3506,7 @@ mod tests {
     }
 
     #[test]
-    fn block_move_then_layout_cross_round_trip_preserves_height() {
+    fn single_monitor_move_then_layout_cross_round_trip_preserves_height() {
         let mut pair =
             pair_via_layout_exchange(vec![display("1", 0, 100, 800, 600)], mac_dual_displays());
         let pc_mon = pair
@@ -3395,44 +3517,41 @@ mod tests {
             .find(|m| m.device_id.0 == "a")
             .unwrap()
             .bounds;
-        for remote in pair.a.layout.monitors.iter_mut() {
-            if remote.device_id.0 == "b" {
-                remote.bounds.x = pc_mon.right();
-                remote.bounds.y = pc_mon.y;
-            }
+        if let Some(remote) = pair.a.layout.monitors.iter_mut().find(|m| m.id.0 == "b:1") {
+            remote.bounds.x = pc_mon.right();
+            remote.bounds.y = pc_mon.y;
+        }
+        if let Some(remote) = pair.a.layout.monitors.iter_mut().find(|m| m.id.0 == "b:2") {
+            remote.bounds.x = pc_mon.right();
+            remote.bounds.y = pc_mon.y + 500;
         }
         pair.a.persist_peer_layouts();
         pair.a.broadcast_layout();
         pump(&mut pair);
 
+        let m2_placed = monitor_bounds(&pair.a.layout, "b", "2");
         let mac_on_a = monitor_bounds(&pair.a.layout, "b", "1");
         pair.a.on_cmd(Cmd::MoveMonitor {
             id: "b:1".into(),
             x: mac_on_a.x,
             y: mac_on_a.y + 50,
-            single: false,
+            block: false,
         });
         pump(&mut pair);
+        assert_eq!(monitor_bounds(&pair.a.layout, "b", "2"), m2_placed);
+
         pair.a.config.cross_mode = CrossMode::Layout;
         pair.b.config.cross_mode = CrossMode::Layout;
 
         let layout_y = 250;
         let mac_layout_top = monitor_bounds(&pair.a.layout, "b", "1").y;
         let mac_physical_y = layout_y - mac_layout_top;
-        let pc_right = pair
-            .a
-            .layout
-            .monitors
-            .iter()
-            .find(|m| m.device_id.0 == "a")
-            .unwrap()
-            .bounds
-            .right()
-            - 1;
+        let pc_right = pc_mon.right() - 1;
         pair.a_host.warp(pc_right, layout_y);
         pair.a.on_motion(pc_right, layout_y, 5, 0);
         pump(&mut pair);
         assert_eq!(pair.a.controlling().as_deref(), Some("b"));
+        assert_eq!(pair.b.session.monitor.0, "b:1");
         let (_, cy) = pair.b_host.cursor_pos().unwrap();
         assert!((cy - mac_physical_y).abs() <= 2);
 
@@ -3448,6 +3567,57 @@ mod tests {
     }
 
     #[test]
+    fn layout_cross_from_pc_into_each_mac_monitor_at_layout_height() {
+        let mut pair =
+            pair_via_layout_exchange(vec![display("1", 0, 0, 1920, 1080)], mac_dual_displays());
+        let pc_mon = pair
+            .a
+            .layout
+            .monitors
+            .iter()
+            .find(|m| m.device_id.0 == "a")
+            .unwrap()
+            .bounds;
+        broadcast_vertical_mac_on_pc(&mut pair);
+        assert_mac_vertical_geometry_matches_across_peers(&pair);
+
+        pair.a.config.cross_mode = CrossMode::Layout;
+        pair.b.config.cross_mode = CrossMode::Layout;
+
+        for (display_suffix, layout_y) in [("1", 350), ("2", 820)] {
+            let mac_physical_y = expected_mac_physical_y(&pair, display_suffix, layout_y);
+            let pc_right = pc_mon.right() - 1;
+            pair.a_host.warp(pc_right, layout_y);
+            pair.a.on_motion(pc_right, layout_y, 5, 0);
+            pump(&mut pair);
+            assert_eq!(pair.a.controlling().as_deref(), Some("b"));
+            assert_eq!(
+                pair.b.session.monitor.0,
+                format!("b:{display_suffix}"),
+                "cross at layout y={layout_y}"
+            );
+            let (_, cy) = pair.b_host.cursor_pos().unwrap();
+            assert!(
+                (cy - mac_physical_y).abs() <= 2,
+                "display {display_suffix}: mac physical y={cy}, expected {mac_physical_y}"
+            );
+
+            let mac_left = monitor_bounds(&pair.b.layout, "b", display_suffix).x;
+            pair.b_host.warp(mac_left + 1, mac_physical_y);
+            pair.b.on_net(NetEvt::Datagram {
+                peer: "a".into(),
+                bytes: motion_bytes(-5, 0),
+            });
+            pump(&mut pair);
+            let (_, ay) = pair.a_host.cursor_pos().unwrap();
+            assert!(
+                (ay - layout_y).abs() <= 2,
+                "display {display_suffix}: pc y={ay}, expected {layout_y}"
+            );
+        }
+    }
+
+    #[test]
     fn block_move_persists_across_restart() {
         let mut pair =
             pair_via_layout_exchange(vec![display("1", 0, 0, 1920, 1080)], mac_dual_displays());
@@ -3456,7 +3626,7 @@ mod tests {
             id: "b:2".into(),
             x: m2.x,
             y: m2.y + 60,
-            single: false,
+            block: true,
         });
         pump(&mut pair);
         let expected_y = monitor_bounds(&pair.a.layout, "b", "1").y;
@@ -3471,6 +3641,171 @@ mod tests {
         }
         assert_eq!(monitor_bounds(&restarted.layout, "b", "1").y, expected_y);
         assert_eq!(monitor_bounds(&restarted.layout, "b", "2").y, m2.y + 60);
+    }
+
+    #[test]
+    fn cross_each_mac_display_in_layout_and_proportional_modes() {
+        for cross_mode in [CrossMode::Layout, CrossMode::Proportional] {
+            let mut pair =
+                pair_via_layout_exchange(vec![display("1", 0, 0, 1920, 1080)], mac_dual_displays());
+            broadcast_vertical_mac_on_pc(&mut pair);
+            pair.a.config.cross_mode = cross_mode;
+            pair.b.config.cross_mode = cross_mode;
+            let pc_right = pair
+                .a
+                .layout
+                .monitors
+                .iter()
+                .find(|m| m.device_id.0 == "a")
+                .unwrap()
+                .bounds
+                .right()
+                - 1;
+            for (display_suffix, layout_y) in [("1", 350), ("2", 820)] {
+                pair.a_host.warp(pc_right, layout_y);
+                pair.a.on_motion(pc_right, layout_y, 5, 0);
+                pump(&mut pair);
+                assert_eq!(pair.a.controlling().as_deref(), Some("b"));
+                assert_eq!(pair.b.session.monitor.0, format!("b:{display_suffix}"));
+                let expected_cy =
+                    expected_mac_physical_y_after_cross(&pair, cross_mode, layout_y, pc_right);
+                let (_, cy) = pair.b_host.cursor_pos().unwrap();
+                assert!(
+                    (cy - expected_cy).abs() <= 2,
+                    "mode {cross_mode:?} display {display_suffix}: cy={cy}, expected {expected_cy}"
+                );
+                let mac_left = monitor_bounds(&pair.b.layout, "b", display_suffix).x;
+                pair.b_host.warp(mac_left + 1, cy);
+                pair.b.on_net(NetEvt::Datagram {
+                    peer: "a".into(),
+                    bytes: motion_bytes(-5, 0),
+                });
+                pump(&mut pair);
+                assert_eq!(pair.a.controlling(), None);
+            }
+        }
+    }
+
+    #[test]
+    fn controlled_motion_hops_virtual_vertical_stack_on_dual_mac() {
+        use crate::monitor_coords::layout_point_to_phys;
+
+        let mut pair =
+            pair_via_layout_exchange(vec![display("1", 0, 0, 1920, 1080)], mac_dual_displays());
+        broadcast_vertical_mac_on_pc(&mut pair);
+        pair.a.config.cross_mode = CrossMode::Layout;
+        pair.b.config.cross_mode = CrossMode::Layout;
+        let pc_right = pair
+            .a
+            .layout
+            .monitors
+            .iter()
+            .find(|m| m.device_id.0 == "a")
+            .unwrap()
+            .bounds
+            .right()
+            - 1;
+        pair.a_host.warp(pc_right, 350);
+        pair.a.on_motion(pc_right, 350, 5, 0);
+        pump(&mut pair);
+        assert_eq!(pair.b.session.monitor.0, "b:1");
+
+        let b1 = monitor_bounds(&pair.b.layout, "b", "1");
+        let lx = b1.x + b1.width as i32 / 2;
+        let ly = b1.bottom() - 1;
+        let (px, py) = layout_point_to_phys(&pair.b.layout, &MonitorId("b:1".into()), lx, ly);
+        pair.b_host.warp(px, py);
+        pair.b.on_net(NetEvt::Datagram {
+            peer: "a".into(),
+            bytes: motion_bytes(0, 5),
+        });
+        pump(&mut pair);
+        assert_eq!(pair.b.session.monitor.0, "b:2");
+        let b2_phys = pair
+            .b
+            .layout
+            .monitor(&MonitorId("b:2".into()))
+            .unwrap()
+            .physical_bounds();
+        let (cx, cy) = pair.b_host.cursor_pos().unwrap();
+        assert!(
+            b2_phys.contains(cx, cy),
+            "cursor ({cx},{cy}) not on physical display 2"
+        );
+
+        pair.b_host.warp(b2_phys.x + 10, cy);
+        pair.b.on_net(NetEvt::Datagram {
+            peer: "a".into(),
+            bytes: motion_bytes(5, 0),
+        });
+        pump(&mut pair);
+        assert_eq!(
+            pair.b.session.monitor.0, "b:2",
+            "physical side-by-side must not hop when virtually stacked"
+        );
+    }
+
+    #[test]
+    fn adopted_virtual_layout_persists_locally_and_reset_restores_physical() {
+        let mut pair =
+            pair_via_layout_exchange(vec![display("1", 0, 0, 1920, 1080)], mac_dual_displays());
+        broadcast_vertical_mac_on_pc(&mut pair);
+        assert!(local_layout_file_exists(pair._b_dir.path()));
+        let virt1 = monitor_bounds(&pair.b.layout, "b", "1");
+        let virt2 = monitor_bounds(&pair.b.layout, "b", "2");
+
+        let dir = pair._b_dir.path().to_path_buf();
+        let (mut restarted, _host, _net, _dir2) =
+            named_engine_with_displays("b", mac_dual_displays());
+        restarted.dir = dir.clone();
+        restarted.peer_layouts = crate::layout_store::load_all(&dir);
+        for saved in restarted.peer_layouts.values() {
+            crate::layout_store::apply_saved(&mut restarted.layout, saved);
+        }
+        let local_overrides = crate::layout_store::load_local_overrides(&dir);
+        crate::layout_store::apply_local_overrides(
+            &mut restarted.layout,
+            &DeviceId("b".into()),
+            &local_overrides,
+        );
+        assert_eq!(monitor_bounds(&restarted.layout, "b", "1"), virt1);
+        assert_eq!(monitor_bounds(&restarted.layout, "b", "2"), virt2);
+
+        pair.b.on_cmd(Cmd::ResetLayout);
+        pump(&mut pair);
+        assert!(!local_layout_file_exists(pair._b_dir.path()));
+        let b1 = pair.b.layout.monitor(&MonitorId("b:1".into())).unwrap();
+        let b2 = pair.b.layout.monitor(&MonitorId("b:2".into())).unwrap();
+        assert_eq!(b1.bounds, b1.physical_bounds());
+        assert_eq!(b2.bounds, b2.physical_bounds());
+    }
+
+    #[test]
+    fn single_monitor_move_persists_across_restart() {
+        let mut pair =
+            pair_via_layout_exchange(vec![display("1", 0, 0, 1920, 1080)], mac_dual_displays());
+        let m1 = monitor_bounds(&pair.a.layout, "b", "1");
+        let m2 = monitor_bounds(&pair.a.layout, "b", "2");
+        pair.a.on_cmd(Cmd::MoveMonitor {
+            id: "b:2".into(),
+            x: m2.x + 90,
+            y: m2.y + 45,
+            block: false,
+        });
+        pump(&mut pair);
+        assert_eq!(monitor_bounds(&pair.a.layout, "b", "1"), m1);
+
+        let dir = pair._a_dir.path().to_path_buf();
+        let (mut restarted, _host, _net, _dir2) =
+            named_engine_with_displays("a", vec![display("1", 0, 0, 1920, 1080)]);
+        restarted.dir = dir.clone();
+        restarted.peer_layouts = crate::layout_store::load_all(&dir);
+        for saved in restarted.peer_layouts.values() {
+            crate::layout_store::apply_saved(&mut restarted.layout, saved);
+        }
+        assert_eq!(monitor_bounds(&restarted.layout, "b", "1"), m1);
+        assert_eq!(monitor_bounds(&restarted.layout, "b", "2").x, m2.x + 90);
+        assert_eq!(monitor_bounds(&restarted.layout, "b", "2").y, m2.y + 45);
     }
 
     #[test]

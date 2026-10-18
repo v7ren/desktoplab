@@ -8,6 +8,7 @@ mod hotkeys;
 mod layout_store;
 mod local;
 mod log;
+mod monitor_coords;
 mod netloop;
 mod peers;
 mod remote;

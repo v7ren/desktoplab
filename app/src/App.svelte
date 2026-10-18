@@ -17,7 +17,7 @@
   let drag = $state<{
     id: string;
     deviceId: string;
-    single: boolean;
+    block: boolean;
     canvasMinX: number;
     canvasMinY: number;
     originX: number;
@@ -93,7 +93,7 @@
     const dx = drag.x - drag.originX;
     const dy = drag.y - drag.originY;
     return monitors.map((item) => {
-      if (drag.single) {
+      if (!drag.block) {
         return item.id === drag.id ? { ...item, x: drag.x, y: drag.y } : item;
       }
       if (item.device_id === drag.deviceId) {
@@ -140,11 +140,11 @@
     ny: number,
     w: number,
     h: number,
-    selfDeviceId: string,
     monitors: Snapshot["monitors"],
+    skip: (other: Snapshot["monitors"][number]) => boolean,
   ): { x: number; y: number } {
     for (const other of monitors) {
-      if (other.device_id === selfDeviceId) continue;
+      if (skip(other)) continue;
       const oR = other.x + other.width;
       const oB = other.y + other.height;
       const oCx = other.x + other.width / 2;
@@ -179,8 +179,8 @@
     if (shiftKey) return { x, y };
     const self = monitors.find((item) => item.id === dragState.id);
     if (!self) return { x, y };
-    if (dragState.single) {
-      const snapped = snapRect(x, y, self.width, self.height, self.device_id, monitors);
+    if (!dragState.block) {
+      const snapped = snapRect(x, y, self.width, self.height, monitors, (other) => other.id === dragState.id);
       return { x: Math.round(snapped.x), y: Math.round(snapped.y) };
     }
     const dx = x - dragState.originX;
@@ -192,8 +192,8 @@
       blockY,
       dragState.blockW,
       dragState.blockH,
-      dragState.deviceId,
       monitors,
+      (other) => other.device_id === dragState.deviceId,
     );
     const snapDx = snapped.x - dragState.blockMinX;
     const snapDy = snapped.y - dragState.blockMinY;
@@ -222,16 +222,16 @@
     const blockMaxB = Math.max(...deviceMons.map((item) => item.y + item.height));
     const originX = monitor.x;
     const originY = monitor.y;
-    const single = event.altKey;
+    const block = event.altKey;
     let ended = false;
     let throttle: ReturnType<typeof setTimeout> | null = null;
     let latestX = originX;
     let latestY = originY;
-    let latestSingle = single;
+    let latestBlock = block;
     drag = {
       id,
       deviceId: monitor.device_id,
-      single,
+      block,
       canvasMinX: origin.minX,
       canvasMinY: origin.minY,
       originX,
@@ -248,17 +248,15 @@
       const rawX = Math.round(originX + (ev.clientX - startX) * 12);
       const rawY = Math.round(originY + (ev.clientY - startY) * 12);
       const base = snap?.monitors ?? [];
-      const dragState = { ...drag, single: ev.altKey };
-      const snapped = snapMonitorPosition(dragState, rawX, rawY, base, ev.shiftKey);
+      const snapped = snapMonitorPosition(drag, rawX, rawY, base, ev.shiftKey);
       latestX = snapped.x;
       latestY = snapped.y;
-      latestSingle = ev.altKey;
-      drag = { ...dragState, x: latestX, y: latestY };
+      drag = { ...drag, x: latestX, y: latestY };
       if (throttle) return;
       throttle = setTimeout(() => {
         throttle = null;
         if (!ended) {
-          void send({ MoveMonitor: { id, x: latestX, y: latestY, single: latestSingle } });
+          void send({ MoveMonitor: { id, x: latestX, y: latestY, block: latestBlock } });
         }
       }, 80);
     };
@@ -271,7 +269,7 @@
         clearTimeout(throttle);
         throttle = null;
       }
-      void send({ MoveMonitor: { id, x: latestX, y: latestY, single: latestSingle } }).then(() => {
+      void send({ MoveMonitor: { id, x: latestX, y: latestY, block: latestBlock } }).then(() => {
         drag = null;
         void refresh();
       });
@@ -422,6 +420,9 @@
           </button>
         {/each}
       </div>
+      <p class="muted">
+        Drag a display to arrange it. Hold Alt to move the whole computer. Hold Shift to turn off snapping.
+      </p>
     {:else if page === "Hotkeys" && snap}
       <h2>Hotkeys</h2>
       {#each hotkeyFields as [action, label]}

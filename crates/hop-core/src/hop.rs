@@ -183,6 +183,7 @@ mod tests {
             device_id: DeviceId("local".into()),
             name: id.into(),
             bounds: PhysRect::new(x, y, w, h),
+            phys: None,
             scale: 1.0,
         }
     }

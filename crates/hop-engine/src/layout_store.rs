@@ -4,9 +4,10 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use hop_core::{DeviceId, Layout, Monitor};
+use hop_core::{DeviceId, Layout, Monitor, MonitorId, PhysRect};
 
 const LAYOUTS_DIR: &str = "layouts";
+const LOCAL_LAYOUT_STEM: &str = "_local";
 
 pub fn layouts_dir(config_dir: &Path) -> PathBuf {
     config_dir.join(LAYOUTS_DIR)
@@ -26,6 +27,9 @@ pub fn load_all(dir: &Path) -> HashMap<String, Layout> {
                 .and_then(|s| s.to_str())
                 .unwrap_or_default()
                 .to_string();
+            if peer == LOCAL_LAYOUT_STEM {
+                continue;
+            }
             if let Ok(text) = fs::read_to_string(&path) {
                 if let Ok(layout) = serde_json::from_str::<Layout>(&text) {
                     out.insert(peer, layout);
@@ -168,8 +172,70 @@ pub fn align_incoming_layout(
     })
 }
 
-/// One remote device's monitors in peer-native coordinates (block origin at min x/y).
-pub fn device_fragment_at_origin(layout: &Layout, remote: &DeviceId) -> Layout {
+pub fn adopt_local_virtual_bounds(local: &mut Layout, aligned: &Layout, device: &DeviceId) {
+    for remote in aligned.monitors.iter().filter(|m| &m.device_id == device) {
+        if let Some(here) = local.monitors.iter_mut().find(|m| m.id == remote.id) {
+            here.bounds = remote.bounds;
+        }
+    }
+}
+
+pub fn local_virtual_bounds(layout: &Layout, device: &DeviceId) -> Vec<(MonitorId, PhysRect)> {
+    layout
+        .monitors
+        .iter()
+        .filter(|m| &m.device_id == device)
+        .map(|m| (m.id.clone(), m.bounds))
+        .collect()
+}
+
+pub fn save_local_overrides(dir: &Path, layout: &Layout, device: &DeviceId) -> Result<(), String> {
+    let monitors = local_virtual_bounds(layout, device);
+    if monitors.is_empty() {
+        return Ok(());
+    }
+    let root = layouts_dir(dir);
+    fs::create_dir_all(&root).map_err(|e| e.to_string())?;
+    let payload: Vec<(String, PhysRect)> = monitors
+        .into_iter()
+        .map(|(id, bounds)| (id.0, bounds))
+        .collect();
+    let text = serde_json::to_string_pretty(&payload).map_err(|e| e.to_string())?;
+    fs::write(root.join(format!("{LOCAL_LAYOUT_STEM}.json")), text).map_err(|e| e.to_string())
+}
+
+pub fn load_local_overrides(dir: &Path) -> HashMap<MonitorId, PhysRect> {
+    let path = layouts_dir(dir).join(format!("{LOCAL_LAYOUT_STEM}.json"));
+    let Ok(text) = fs::read_to_string(&path) else {
+        return HashMap::new();
+    };
+    let Ok(entries): Result<Vec<(String, PhysRect)>, _> = serde_json::from_str(&text) else {
+        return HashMap::new();
+    };
+    entries
+        .into_iter()
+        .map(|(id, bounds)| (MonitorId(id), bounds))
+        .collect()
+}
+
+pub fn apply_local_overrides(
+    layout: &mut Layout,
+    device: &DeviceId,
+    overrides: &HashMap<MonitorId, PhysRect>,
+) {
+    for monitor in layout
+        .monitors
+        .iter_mut()
+        .filter(|m| &m.device_id == device)
+    {
+        if let Some(bounds) = overrides.get(&monitor.id) {
+            monitor.bounds = *bounds;
+        }
+    }
+}
+
+/// Remote device monitors in peer-native physical arrangement (origin at min x/y).
+pub fn device_fragment_at_arrangement(layout: &Layout, remote: &DeviceId) -> Layout {
     let monitors: Vec<Monitor> = layout
         .monitors
         .iter()
@@ -188,8 +254,31 @@ pub fn device_fragment_at_origin(layout: &Layout, remote: &DeviceId) -> Layout {
             wrap: layout.wrap,
         };
     }
-    let min_x = monitors.iter().map(|m| m.bounds.x).min().unwrap_or(0);
-    let min_y = monitors.iter().map(|m| m.bounds.y).min().unwrap_or(0);
+    let min_x = monitors
+        .iter()
+        .map(|m| m.arrangement_bounds().x)
+        .min()
+        .unwrap_or(0);
+    let min_y = monitors
+        .iter()
+        .map(|m| m.arrangement_bounds().y)
+        .min()
+        .unwrap_or(0);
+    let placed: Vec<Monitor> = monitors
+        .into_iter()
+        .map(|m| {
+            let arrange = m.arrangement_bounds();
+            let mut copy = m.clone();
+            copy.bounds = PhysRect::new(
+                arrange.x - min_x,
+                arrange.y - min_y,
+                arrange.width,
+                arrange.height,
+            );
+            copy.phys = Some(arrange);
+            copy
+        })
+        .collect();
     Layout {
         devices: layout
             .devices
@@ -197,7 +286,7 @@ pub fn device_fragment_at_origin(layout: &Layout, remote: &DeviceId) -> Layout {
             .filter(|d| &d.id == remote)
             .cloned()
             .collect(),
-        monitors: translate_monitors(&monitors, -min_x, -min_y),
+        monitors: placed,
         wrap: layout.wrap,
     }
 }
@@ -238,6 +327,7 @@ mod tests {
             device_id: DeviceId(dev.into()),
             name: id.into(),
             bounds: PhysRect::new(x, y, 100, 100),
+            phys: None,
             scale: 1.0,
         }
     }

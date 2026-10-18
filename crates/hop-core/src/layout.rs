@@ -93,9 +93,24 @@ pub struct Monitor {
     pub id: MonitorId,
     pub device_id: DeviceId,
     pub name: String,
+    /// Virtual layout bounds used for crossing and the editor.
     pub bounds: PhysRect,
+    /// Real OS bounds when they differ from `bounds`. Omitted when virtual matches physical.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phys: Option<PhysRect>,
     /// Physical pixels per OS point. Windows uses dpi/96, macOS uses the backing scale.
     pub scale: f64,
+}
+
+impl Monitor {
+    pub fn physical_bounds(&self) -> PhysRect {
+        self.phys.unwrap_or(self.bounds)
+    }
+
+    /// Peer-native arrangement used when resetting remote blocks to OS geometry.
+    pub fn arrangement_bounds(&self) -> PhysRect {
+        self.phys.unwrap_or(self.bounds)
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -148,6 +163,7 @@ mod tests {
             device_id: DeviceId(dev.into()),
             name: id.into(),
             bounds: PhysRect::new(x, y, w, h),
+            phys: None,
             scale: 1.0,
         }
     }
