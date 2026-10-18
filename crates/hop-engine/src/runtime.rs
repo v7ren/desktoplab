@@ -20,6 +20,10 @@ use crate::clipboard::prepare;
 use crate::config::Config;
 use crate::dnd;
 use crate::host_worker::{spawn as spawn_host_worker, HostJob};
+use crate::layout_store::{
+    align_incoming_layout, apply_saved, default_place, load_all, merge_remote_into,
+    received_includes_local, remote_fragment, save_peer,
+};
 use crate::local::{on_hotkey, on_motion, LocalSession, MotionEffect};
 use crate::log::{self, Log};
 use crate::netloop::{self, NetCmd, NetEvt};
@@ -243,6 +247,7 @@ fn engine_main(
     };
     let (host_jobs, host_results) = spawn_host_worker(host.clone());
     let permissions = host.permissions();
+    let peer_layouts = load_all(&dir);
     let mut engine = Engine {
         dir,
         config,
@@ -274,7 +279,11 @@ fn engine_main(
         config_pending: false,
         config_deadline: Instant::now(),
         permissions,
+        peer_layouts,
     };
+    for saved in engine.peer_layouts.values() {
+        apply_saved(&mut engine.layout, saved);
+    }
     engine.publish_if_dirty();
     let publish_tick = crossbeam_channel::tick(Duration::from_millis(50));
     run_engine_loop(
@@ -377,6 +386,8 @@ struct Engine {
     config_pending: bool,
     config_deadline: Instant,
     permissions: hop_platform::PermissionStatus,
+    /// Remote monitor arrangement per paired peer device id, loaded from disk.
+    peer_layouts: HashMap<String, Layout>,
 }
 
 impl Engine {
@@ -708,13 +719,7 @@ impl Engine {
                     self.status = format!("could not parse {text}");
                 }
             }
-            Cmd::MoveMonitor { id, x, y } => {
-                if let Some(monitor) = self.layout.monitors.iter_mut().find(|m| m.id.0 == id) {
-                    monitor.bounds.x = x;
-                    monitor.bounds.y = y;
-                }
-                self.broadcast_layout();
-            }
+            Cmd::MoveMonitor { id, x, y } => self.move_monitor(&id, x, y),
             Cmd::CancelTransfer(id) => {
                 if self.transfers.cancel_flag(id) {
                     let _ = self.net.send(NetCmd::CancelTransfer(id));
@@ -779,7 +784,7 @@ impl Engine {
                         stalled: false,
                     },
                 );
-                self.send_control(&id, layout_msg(&self.local_layout()));
+                self.broadcast_layout();
                 self.peers = PeerStore::load(&self.dir);
                 // N4.1: a code typed before the session existed is applied here,
                 // as soon as the peer comes online (never by dialing).
@@ -958,7 +963,7 @@ impl Engine {
                     self.flush_clip(token, kind);
                 }
             }
-            StreamMsg::Layout { bytes } => self.merge_layout(&bytes),
+            StreamMsg::Layout { bytes } => self.merge_layout(peer, &bytes),
             StreamMsg::DragStart { token, files } => {
                 self.status = format!("drag {token} ({} files)", files.len());
             }
@@ -1094,41 +1099,92 @@ impl Engine {
     }
 
     fn broadcast_layout(&self) {
-        let msg = layout_msg(&self.local_layout());
+        let msg = layout_msg(&self.layout);
         for id in self.online.keys() {
             self.send_control(id, msg.clone());
         }
     }
 
-    fn merge_layout(&mut self, bytes: &[u8]) {
-        let Ok(remote) = serde_json::from_slice::<Layout>(bytes) else {
+    fn merge_layout(&mut self, from_peer: &str, bytes: &[u8]) {
+        let Ok(received) = serde_json::from_slice::<Layout>(bytes) else {
             return;
         };
-        let ids: HashSet<_> = remote.devices.iter().map(|d| d.id.clone()).collect();
-        self.layout.monitors.retain(|m| !ids.contains(&m.device_id));
-        self.layout.devices.retain(|d| !ids.contains(&d.id));
-        let shift = self
-            .layout
-            .monitors
-            .iter()
-            .map(|m| m.bounds.right())
-            .max()
-            .unwrap_or(0);
-        let remote_left = remote
-            .monitors
-            .iter()
-            .map(|m| m.bounds.x)
-            .min()
-            .unwrap_or(0);
-        let dx = shift.saturating_sub(remote_left);
-        for mut monitor in remote.monitors {
-            monitor.bounds.x = monitor.bounds.x.saturating_add(dx);
-            self.layout.monitors.push(monitor);
-        }
-        self.layout.devices.extend(remote.devices);
+        let device = self.session.device.clone();
+        let incoming = if received_includes_local(&received, &device) {
+            align_incoming_layout(&received, &self.layout, &device)
+                .unwrap_or_else(|| default_place(&self.layout, &device, from_peer, received))
+        } else if let Some(saved) = self.peer_layouts.get(from_peer).cloned() {
+            saved
+        } else {
+            default_place(&self.layout, &device, from_peer, received)
+        };
+        merge_remote_into(&mut self.layout, &device, incoming);
+        self.persist_peer_layouts();
     }
 
-    fn refresh_displays(&mut self, displays: &[DisplayInfo]) {
+    fn persist_peer_layouts(&mut self) {
+        let device = &self.session.device;
+        let remote = remote_fragment(&self.layout, device);
+        for peer_device in remote.devices.iter().map(|d| d.id.0.clone()) {
+            let fragment = Layout {
+                devices: remote
+                    .devices
+                    .iter()
+                    .filter(|d| d.id.0 == peer_device)
+                    .cloned()
+                    .collect(),
+                monitors: remote
+                    .monitors
+                    .iter()
+                    .filter(|m| m.device_id.0 == peer_device)
+                    .cloned()
+                    .collect(),
+                wrap: remote.wrap,
+            };
+            let _ = save_peer(&self.dir, &peer_device, &fragment);
+            self.peer_layouts.insert(peer_device.clone(), fragment);
+        }
+    }
+
+    fn move_monitor(&mut self, id: &str, x: i32, y: i32) {
+        let device = self.session.device.clone();
+        let Some(monitor) = self.layout.monitors.iter().find(|m| m.id.0 == id).cloned() else {
+            return;
+        };
+        if monitor.device_id == device {
+            let displays = self.host.list_displays();
+            let physical = layout_from(
+                &device,
+                &self.config.device_name,
+                &displays,
+                self.layout.wrap,
+            );
+            let phys = physical
+                .monitor(&monitor.id)
+                .map(|m| m.bounds)
+                .unwrap_or(monitor.bounds);
+            let dx = x - phys.x;
+            let dy = y - phys.y;
+            if dx != 0 || dy != 0 {
+                for remote in self.layout.monitors.iter_mut() {
+                    if remote.device_id != device {
+                        remote.bounds.x = remote.bounds.x.saturating_add(dx);
+                        remote.bounds.y = remote.bounds.y.saturating_add(dy);
+                    }
+                }
+            }
+            self.refresh_local_monitors(&displays);
+        } else {
+            if let Some(remote) = self.layout.monitors.iter_mut().find(|m| m.id.0 == id) {
+                remote.bounds.x = x;
+                remote.bounds.y = y;
+            }
+        }
+        self.persist_peer_layouts();
+        self.broadcast_layout();
+    }
+
+    fn refresh_local_monitors(&mut self, displays: &[DisplayInfo]) {
         let device = self.session.device.clone();
         let name = self.config.device_name.clone();
         let fresh = layout_from(&device, &name, displays, self.layout.wrap);
@@ -1138,24 +1194,10 @@ impl Engine {
         self.layout.monitors.extend(fresh.monitors);
     }
 
-    fn local_layout(&self) -> Layout {
-        let device = &self.session.device;
-        Layout {
-            devices: self
-                .layout
-                .devices
-                .iter()
-                .filter(|d| &d.id == device)
-                .cloned()
-                .collect(),
-            monitors: self
-                .layout
-                .monitors
-                .iter()
-                .filter(|m| &m.device_id == device)
-                .cloned()
-                .collect(),
-            wrap: self.layout.wrap,
+    fn refresh_displays(&mut self, displays: &[DisplayInfo]) {
+        self.refresh_local_monitors(displays);
+        if !self.online.is_empty() {
+            self.broadcast_layout();
         }
     }
 
@@ -1740,7 +1782,8 @@ mod tests {
         let snap = Arc::new(Mutex::new(empty_snapshot()));
         let (host_jobs, host_results) = spawn_host_worker(host.clone());
         let permissions = host.permissions();
-        let engine = Engine {
+        let peer_layouts = load_all(dir);
+        let mut engine = Engine {
             dir: dir.to_path_buf(),
             config,
             layout,
@@ -1771,7 +1814,11 @@ mod tests {
             config_pending: false,
             config_deadline: Instant::now(),
             permissions,
+            peer_layouts,
         };
+        for saved in engine.peer_layouts.values() {
+            apply_saved(&mut engine.layout, saved);
+        }
         (engine, host_results, net_rx)
     }
 
@@ -2239,14 +2286,17 @@ mod tests {
 
     /// Deliver everything each side queued to the other, until both are quiet.
     fn pump(pair: &mut PeerPair) {
+        let a_id = pair.a.session.device.0.clone();
+        let b_id = pair.b.session.device.0.clone();
         loop {
             let mut moved = false;
             while let Ok(cmd) = pair.b_net.try_recv() {
                 moved = true;
                 match cmd {
-                    NetCmd::SendControl { msg, .. } => pair.a.on_msg("mac", msg),
-                    NetCmd::SendMotion { dx, dy, .. } => pair.a.on_net(NetEvt::Datagram {
-                        peer: "mac".into(),
+                    // `SendControl.peer` is the recipient; messages from B use B's device id.
+                    NetCmd::SendControl { msg, .. } => pair.a.on_msg(&b_id, msg),
+                    NetCmd::SendMotion { peer, dx, dy, .. } => pair.a.on_net(NetEvt::Datagram {
+                        peer,
                         bytes: motion_bytes(dx, dy),
                     }),
                     _ => {}
@@ -2255,9 +2305,10 @@ mod tests {
             while let Ok(cmd) = pair.a_net.try_recv() {
                 moved = true;
                 match cmd {
-                    NetCmd::SendControl { msg, .. } => pair.b.on_msg("pc", msg),
-                    NetCmd::SendMotion { dx, dy, .. } => pair.b.on_net(NetEvt::Datagram {
-                        peer: "pc".into(),
+                    // `SendControl.peer` is the recipient; messages from A use A's device id.
+                    NetCmd::SendControl { msg, .. } => pair.b.on_msg(&a_id, msg),
+                    NetCmd::SendMotion { peer, dx, dy, .. } => pair.b.on_net(NetEvt::Datagram {
+                        peer,
                         bytes: motion_bytes(dx, dy),
                     }),
                     _ => {}
@@ -2536,5 +2587,423 @@ mod tests {
                 .any(|(h, d)| *h == HID_LGUI && *d),
             "an inbound key was not injected verbatim"
         );
+    }
+
+    use hop_core::Side;
+
+    fn named_engine_with_displays(
+        device_id: &str,
+        displays: Vec<DisplayInfo>,
+    ) -> (
+        Engine,
+        Arc<MockHost>,
+        tokio::sync::mpsc::UnboundedReceiver<NetCmd>,
+        tempfile::TempDir,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config {
+            device_id: device_id.into(),
+            device_name: device_id.into(),
+            discovery: false,
+            port: 0,
+            ..Config::default()
+        };
+        config.save(dir.path()).unwrap();
+        let host = Arc::new(MockHost::new(displays));
+        let (engine, _host_results, net_rx) = test_engine(dir.path(), host.clone());
+        (engine, host, net_rx, dir)
+    }
+
+    fn online_event(id: &str, os: OsKind) -> NetEvt {
+        NetEvt::Online {
+            id: id.into(),
+            name: id.into(),
+            os,
+            fingerprint: format!("fp-{id}"),
+            addr: "127.0.0.1:1".into(),
+            code: None,
+        }
+    }
+
+    /// Both engines only know their own displays; exchange layouts like `NetEvt::Online`.
+    fn pair_via_layout_exchange(
+        pc_displays: Vec<DisplayInfo>,
+        mac_displays: Vec<DisplayInfo>,
+    ) -> PeerPair {
+        // Device id `a` < `b` so the PC (a) owns the default and the Mac sits to its right.
+        let (mut a, a_host, a_net, a_dir) = named_engine_with_displays("a", pc_displays);
+        let (mut b, b_host, b_net, b_dir) = named_engine_with_displays("b", mac_displays);
+        add_online(&mut a, "b", OsKind::Macos);
+        add_online(&mut b, "a", OsKind::Windows);
+        a.on_net(online_event("b", OsKind::Macos));
+        b.on_net(online_event("a", OsKind::Windows));
+        let mut pair = PeerPair {
+            a,
+            a_net,
+            b,
+            b_net,
+            a_host,
+            b_host,
+            _a_dir: a_dir,
+            _b_dir: b_dir,
+        };
+        pump(&mut pair);
+        pair
+    }
+
+    fn neighbor_device(layout: &Layout, from: &str, side: Side) -> Option<String> {
+        let monitor = layout.monitors.iter().find(|m| m.device_id.0 == from)?;
+        let (x, y) = match side {
+            Side::Right => (
+                monitor.bounds.right(),
+                monitor.bounds.y + monitor.bounds.height as i32 / 2,
+            ),
+            Side::Left => (
+                monitor.bounds.x - 1,
+                monitor.bounds.y + monitor.bounds.height as i32 / 2,
+            ),
+            Side::Top => (
+                monitor.bounds.x + monitor.bounds.width as i32 / 2,
+                monitor.bounds.y - 1,
+            ),
+            Side::Bottom => (
+                monitor.bounds.x + monitor.bounds.width as i32 / 2,
+                monitor.bounds.bottom(),
+            ),
+        };
+        hop_core::cross(layout, &monitor.id, x, y).map(|a| a.device_id.0)
+    }
+
+    fn display(id: &str, x: i32, y: i32, w: u32, h: u32) -> DisplayInfo {
+        DisplayInfo {
+            id: id.into(),
+            name: id.into(),
+            x,
+            y,
+            width: w,
+            height: h,
+            scale: 1.0,
+            primary: true,
+        }
+    }
+
+    /// (1) Layouts are mirror images after the real layout broadcast path.
+    #[test]
+    fn exchanged_layouts_are_mirror_images() {
+        let pair = pair_via_layout_exchange(
+            vec![display("1", 0, 0, 1920, 1080)],
+            vec![display("1", 0, 0, 1920, 1440)],
+        );
+        assert_eq!(
+            neighbor_device(&pair.a.layout, "a", Side::Right).as_deref(),
+            Some("b")
+        );
+        assert_eq!(
+            neighbor_device(&pair.b.layout, "b", Side::Left).as_deref(),
+            Some("a")
+        );
+    }
+
+    /// (2) Cross PC→Mac on the right edge, return by pushing left on the Mac.
+    #[test]
+    fn cross_to_mac_and_return_home_via_shared_left_edge() {
+        let mut pair = pair_via_layout_exchange(
+            vec![display("1", 0, 0, 1920, 1080)],
+            vec![display("1", 0, 0, 1920, 1440)],
+        );
+        pair.a_host.warp(1919, 809);
+        pair.a.on_motion(1919, 809, 5, 0);
+        pump(&mut pair);
+        assert_eq!(pair.a.controlling().as_deref(), Some("b"));
+        assert_eq!(pair.b.controller.as_deref(), Some("a"));
+
+        let mac_left = pair
+            .b
+            .layout
+            .monitors
+            .iter()
+            .find(|m| m.device_id.0 == "b")
+            .unwrap()
+            .bounds
+            .x;
+        pair.b_host.warp(mac_left + 1, 1080);
+        pair.b.on_net(NetEvt::Datagram {
+            peer: "a".into(),
+            bytes: motion_bytes(-5, 0),
+        });
+        pump(&mut pair);
+
+        assert_eq!(pair.b.controller, None);
+        assert_eq!(pair.a.controlling(), None);
+        let (ax, ay) = pair.a_host.cursor_pos().unwrap();
+        assert_eq!(ax, 1919);
+        assert!((ay - 809).abs() <= 2);
+    }
+
+    /// (3) Peer on the left, above, and below with size/offset differences.
+    #[test]
+    fn mirror_crossing_works_for_left_above_and_below() {
+        let left_pair = pair_via_layout_exchange(
+            vec![display("1", 0, 0, 1920, 1080)],
+            vec![display("1", 0, 0, 1280, 900)],
+        );
+        let mut left = left_pair;
+        let pc_mon = left
+            .a
+            .layout
+            .monitors
+            .iter()
+            .find(|m| m.device_id.0 == "a")
+            .unwrap()
+            .bounds;
+        for remote in left.a.layout.monitors.iter_mut() {
+            if remote.device_id.0 == "b" {
+                let w = remote.bounds.width as i32;
+                remote.bounds.x = pc_mon.x - w;
+                remote.bounds.y = pc_mon.y;
+            }
+        }
+        left.a.persist_peer_layouts();
+        left.a.broadcast_layout();
+        pump(&mut left);
+        assert_eq!(
+            neighbor_device(&left.a.layout, "a", Side::Left).as_deref(),
+            Some("b")
+        );
+        assert_eq!(
+            neighbor_device(&left.b.layout, "b", Side::Right).as_deref(),
+            Some("a")
+        );
+
+        let mut above = pair_via_layout_exchange(
+            vec![display("1", 0, 100, 800, 600)],
+            vec![display("1", 0, 0, 800, 400)],
+        );
+        let b_mon = above
+            .b
+            .layout
+            .monitors
+            .iter()
+            .find(|m| m.device_id.0 == "b")
+            .unwrap()
+            .bounds;
+        for remote in above.b.layout.monitors.iter_mut() {
+            if remote.device_id.0 == "a" {
+                remote.bounds.x = b_mon.x;
+                remote.bounds.y = b_mon.bottom();
+            }
+        }
+        above.b.persist_peer_layouts();
+        above.b.broadcast_layout();
+        pump(&mut above);
+        assert_eq!(
+            neighbor_device(&above.a.layout, "a", Side::Top).as_deref(),
+            Some("b")
+        );
+        assert_eq!(
+            neighbor_device(&above.b.layout, "b", Side::Bottom).as_deref(),
+            Some("a")
+        );
+
+        let mut below = pair_via_layout_exchange(
+            vec![display("1", 0, 0, 800, 600)],
+            vec![display("1", 0, 0, 800, 400)],
+        );
+        let pc_mon = below
+            .a
+            .layout
+            .monitors
+            .iter()
+            .find(|m| m.device_id.0 == "a")
+            .unwrap()
+            .bounds;
+        for remote in below.a.layout.monitors.iter_mut() {
+            if remote.device_id.0 == "b" {
+                remote.bounds.x = pc_mon.x;
+                remote.bounds.y = pc_mon.bottom();
+            }
+        }
+        below.a.persist_peer_layouts();
+        below.a.broadcast_layout();
+        pump(&mut below);
+        assert_eq!(
+            neighbor_device(&below.a.layout, "a", Side::Bottom).as_deref(),
+            Some("b")
+        );
+        assert_eq!(
+            neighbor_device(&below.b.layout, "b", Side::Top).as_deref(),
+            Some("a")
+        );
+    }
+
+    /// (4) Editor move on one side updates the other and survives re-send and restart.
+    #[test]
+    fn move_monitor_syncs_persists_and_survives_resync_and_restart() {
+        let mut pair = pair_via_layout_exchange(
+            vec![display("1", 0, 0, 1920, 1080)],
+            vec![display("1", 0, 0, 1920, 1080)],
+        );
+        let mac_on_a = pair
+            .a
+            .layout
+            .monitors
+            .iter()
+            .find(|m| m.device_id.0 == "b")
+            .unwrap()
+            .id
+            .0
+            .clone();
+        pair.a.on_cmd(Cmd::MoveMonitor {
+            id: mac_on_a,
+            x: 1920,
+            y: 120,
+        });
+        pump(&mut pair);
+        assert_eq!(
+            pair.a
+                .layout
+                .monitors
+                .iter()
+                .find(|m| m.device_id.0 == "b")
+                .unwrap()
+                .bounds
+                .y,
+            120
+        );
+        // Local monitors stay at physical coords on B; the PC (remote on B) shifts to match.
+        assert_eq!(
+            pair.b
+                .layout
+                .monitors
+                .iter()
+                .find(|m| m.device_id.0 == "a")
+                .unwrap()
+                .bounds
+                .y,
+            -120
+        );
+
+        pair.a.broadcast_layout();
+        pump(&mut pair);
+        assert_eq!(
+            pair.b
+                .layout
+                .monitors
+                .iter()
+                .find(|m| m.device_id.0 == "a")
+                .unwrap()
+                .bounds
+                .y,
+            -120
+        );
+
+        let dir = pair._a_dir.path().to_path_buf();
+        let (mut restarted, _host, _net, _dir2) =
+            named_engine_with_displays("a", vec![display("1", 0, 0, 1920, 1080)]);
+        restarted.dir = dir.clone();
+        restarted.peer_layouts = crate::layout_store::load_all(&dir);
+        for saved in restarted.peer_layouts.values() {
+            crate::layout_store::apply_saved(&mut restarted.layout, saved);
+        }
+        let mac_y = restarted
+            .layout
+            .monitors
+            .iter()
+            .find(|m| m.device_id.0 == "b")
+            .map(|m| m.bounds.y);
+        assert_eq!(mac_y, Some(120));
+    }
+
+    /// (5) Three round trips across the edge do not stick.
+    #[test]
+    fn three_round_trips_across_the_edge_do_not_stick() {
+        let mut pair = pair_via_layout_exchange(
+            vec![display("1", 0, 0, 1920, 1080)],
+            vec![display("1", 0, 0, 1920, 1080)],
+        );
+        for round in 0..3 {
+            pair.a_host.warp(1919, 540);
+            pair.a.on_motion(1919, 540, 5, 0);
+            pump(&mut pair);
+            assert_eq!(
+                pair.a.controlling().as_deref(),
+                Some("b"),
+                "round {round}: forward"
+            );
+            let mac_left = pair
+                .b
+                .layout
+                .monitors
+                .iter()
+                .find(|m| m.device_id.0 == "b")
+                .unwrap()
+                .bounds
+                .x;
+            pair.b_host.warp(mac_left + 1, 540);
+            pair.b.on_net(NetEvt::Datagram {
+                peer: "a".into(),
+                bytes: motion_bytes(-5, 0),
+            });
+            pump(&mut pair);
+            assert_eq!(pair.a.controlling(), None, "round {round}: home");
+            assert_eq!(pair.b.controller, None, "round {round}: released");
+        }
+    }
+
+    /// (6) After return, keys on the PC are not forwarded and the Mac holds none.
+    #[test]
+    fn keys_stay_local_after_return_from_mac() {
+        let mut pair = pair_via_layout_exchange(
+            vec![display("1", 0, 0, 1920, 1080)],
+            vec![display("1", 0, 0, 1920, 1080)],
+        );
+        pair.a_host.warp(1919, 540);
+        pair.a.on_motion(1919, 540, 5, 0);
+        pump(&mut pair);
+        let hid: u16 = 0x04;
+        pair.a.on_key(hid, true);
+        pump(&mut pair);
+        assert!(mock_key_held(&pair.b_host, hid));
+
+        let mac_left = pair
+            .b
+            .layout
+            .monitors
+            .iter()
+            .find(|m| m.device_id.0 == "b")
+            .unwrap()
+            .bounds
+            .x;
+        pair.b_host.warp(mac_left + 1, 540);
+        pair.b.on_net(NetEvt::Datagram {
+            peer: "a".into(),
+            bytes: motion_bytes(-5, 0),
+        });
+        pump(&mut pair);
+
+        assert!(!mock_key_held(&pair.b_host, hid));
+        pair.a.on_key(hid, true);
+        assert!(
+            pair.b_net.try_recv().is_err(),
+            "key must not forward when home"
+        );
+    }
+
+    /// Existing handoff tests used a hand-built side-by-side layout; document that
+    /// they still model geometry after a correct sync, not the old always-right merge.
+    #[test]
+    fn hand_built_layout_still_crosses_for_regression() {
+        let mut pair = setup_pair(vec![
+            test_monitor("pc:1", "pc", 0, 0, 1920, 1080),
+            test_monitor("mac:1", "mac", 1920, 0, 1920, 1080),
+        ]);
+        make_a_control_b(&mut pair, "mac:1");
+        pair.b_host.warp(1921, 540);
+        pair.b.on_net(NetEvt::Datagram {
+            peer: "pc".into(),
+            bytes: motion_bytes(-5, 0),
+        });
+        pump(&mut pair);
+        assert_eq!(pair.a.controlling(), None);
     }
 }

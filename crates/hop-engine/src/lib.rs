@@ -5,6 +5,7 @@ mod config;
 mod dnd;
 mod host_worker;
 mod hotkeys;
+mod layout_store;
 mod local;
 mod log;
 mod netloop;
