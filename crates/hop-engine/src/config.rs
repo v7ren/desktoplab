@@ -8,6 +8,18 @@ use serde::{Deserialize, Serialize};
 
 use crate::hotkeys::expand;
 
+pub const PARK_INSET_MIN: i32 = 40;
+pub const PARK_INSET_MAX: i32 = 400;
+pub const PARK_INSET_DEFAULT: i32 = 160;
+
+pub fn clamp_park_inset(px: i32) -> i32 {
+    px.clamp(PARK_INSET_MIN, PARK_INSET_MAX)
+}
+
+fn default_park_inset_px() -> i32 {
+    PARK_INSET_DEFAULT
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Config {
     pub device_id: String,
@@ -29,6 +41,9 @@ pub struct Config {
     /// tests, so test runs never show up as computers on a real network.
     #[serde(default = "yes")]
     pub discovery: bool,
+    /// Inset from the monitor edge where the cursor parks while controlling a peer (Windows).
+    #[serde(default = "default_park_inset_px")]
+    pub park_inset_px: i32,
 }
 
 fn yes() -> bool {
@@ -84,17 +99,24 @@ impl Default for Config {
             cross_mode: CrossMode::Layout,
             port: 42424,
             discovery: true,
+            park_inset_px: PARK_INSET_DEFAULT,
         }
     }
 }
 
 impl Config {
+    pub fn normalize(&mut self) {
+        self.park_inset_px = clamp_park_inset(self.park_inset_px);
+    }
+
     pub fn load_or_create(dir: &Path) -> Result<Self, String> {
         fs::create_dir_all(dir).map_err(|err| err.to_string())?;
         let path = dir.join("config.toml");
         if path.exists() {
             let text = fs::read_to_string(&path).map_err(|err| err.to_string())?;
-            toml::from_str(&text).map_err(|err| err.to_string())
+            let mut config: Config = toml::from_str(&text).map_err(|err| err.to_string())?;
+            config.normalize();
+            Ok(config)
         } else {
             let config = Config::default();
             config.save(dir)?;
@@ -156,6 +178,35 @@ mod tests {
         std::fs::write(&path, format!("scroll_reverse_incoming = true\n{}", text)).unwrap();
         let loaded = Config::load_or_create(dir.path()).unwrap();
         assert!(loaded.scroll_reverse_incoming);
+    }
+
+    #[test]
+    fn park_inset_defaults_and_clamps_on_load() {
+        assert_eq!(Config::default().park_inset_px, PARK_INSET_DEFAULT);
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = Config::default();
+        cfg.park_inset_px = 999;
+        cfg.save(dir.path()).unwrap();
+        let loaded = Config::load_or_create(dir.path()).unwrap();
+        assert_eq!(loaded.park_inset_px, PARK_INSET_MAX);
+
+        let path = dir.path().join("config.toml");
+        let text = std::fs::read_to_string(&path)
+            .unwrap()
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("park_inset_px"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(&path, text).unwrap();
+        let loaded = Config::load_or_create(dir.path()).unwrap();
+        assert_eq!(loaded.park_inset_px, PARK_INSET_DEFAULT);
+    }
+
+    #[test]
+    fn clamp_park_inset_bounds() {
+        assert_eq!(clamp_park_inset(10), PARK_INSET_MIN);
+        assert_eq!(clamp_park_inset(160), 160);
+        assert_eq!(clamp_park_inset(500), PARK_INSET_MAX);
     }
 
     /// The old `ctrl_cmd` key still loads into the renamed `alt_cmd` field, so

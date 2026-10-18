@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::clipboard::prepare;
-use crate::config::Config;
+use crate::config::{clamp_park_inset, Config};
 use crate::dnd;
 use crate::host_worker::{spawn as spawn_host_worker, HostJob};
 use crate::layout_store::{
@@ -99,6 +99,7 @@ pub struct Snapshot {
     pub modifiers: ModifierMap,
     pub scroll: ScrollNorm,
     pub scroll_reverse_incoming: bool,
+    pub park_inset_px: i32,
     pub cross_mode: CrossMode,
     pub hotkeys: crate::config::HotkeyConfig,
     pub peers: Vec<PeerView>,
@@ -126,6 +127,7 @@ pub enum Cmd {
     SetModifiers(ModifierMap),
     SetScroll(ScrollNorm),
     SetScrollReverseIncoming(bool),
+    SetParkInset(i32),
     SetCrossMode(CrossMode),
     ConfirmPair {
         id: String,
@@ -240,6 +242,7 @@ fn engine_main(
         }
     }
     host.set_hotkeys(config.chords());
+    host.set_park_span(config.park_inset_px);
     let incoming = dirs::download_dir()
         .unwrap_or_else(|| dir.join("Downloads"))
         .join("DevHop");
@@ -728,6 +731,11 @@ impl Engine {
                 self.config.scroll_reverse_incoming = reverse;
                 save_config = true;
             }
+            Cmd::SetParkInset(px) => {
+                self.config.park_inset_px = clamp_park_inset(px);
+                self.host.set_park_span(self.config.park_inset_px);
+                save_config = true;
+            }
             Cmd::SetCrossMode(mode) => {
                 self.config.cross_mode = mode;
                 save_config = true;
@@ -1097,8 +1105,10 @@ impl Engine {
                         .or_else(|| layout_center_phys(&self.layout, &self.session.monitor))
                         .unwrap_or((0, 0));
                     let displays = self.host.list_displays();
-                    let (x, y) =
-                        hop_platform::park_clip::park_point_for_remote(exit.0, exit.1, &displays);
+                    let span = self.config.park_inset_px;
+                    let (x, y) = hop_platform::park_clip::park_point_for_remote(
+                        exit.0, exit.1, &displays, span,
+                    );
                     self.host.set_remote(true, x, y);
                 }
                 ControlCommand::Forward { peer } => {
@@ -1441,6 +1451,7 @@ impl Engine {
             modifiers: self.config.modifiers,
             scroll: self.config.scroll,
             scroll_reverse_incoming: self.config.scroll_reverse_incoming,
+            park_inset_px: self.config.park_inset_px,
             cross_mode: self.config.cross_mode,
             hotkeys: self.config.hotkeys.clone(),
             peers,
@@ -1614,6 +1625,7 @@ fn empty_snapshot() -> Snapshot {
         modifiers: ModifierMap::default(),
         scroll: ScrollNorm::default(),
         scroll_reverse_incoming: false,
+        park_inset_px: crate::config::PARK_INSET_DEFAULT,
         cross_mode: CrossMode::Layout,
         hotkeys: crate::config::HotkeyConfig::default(),
         peers: Vec::new(),
@@ -1932,6 +1944,7 @@ mod tests {
         for saved in engine.peer_layouts.values() {
             apply_saved(&mut engine.layout, saved);
         }
+        engine.host.set_park_span(engine.config.park_inset_px);
         (engine, host_results, net_rx)
     }
 
@@ -4095,6 +4108,38 @@ mod tests {
     fn apply_incoming_wheel_helper() {
         assert_eq!(apply_incoming_wheel(true, 3, -5), (-3, 5));
         assert_eq!(apply_incoming_wheel(false, 3, -5), (3, -5));
+    }
+
+    #[test]
+    fn park_inset_clamped_persisted_and_used_for_park_point() {
+        use hop_core::ControlCommand;
+
+        let dir = tempfile::tempdir().unwrap();
+        let host = Arc::new(MockHost::new(vec![DisplayInfo {
+            id: "1".into(),
+            name: "Main".into(),
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 1080,
+            scale: 1.0,
+            primary: true,
+        }]));
+        let (mut engine, _, _) = test_engine(dir.path(), host.clone());
+        engine.on_cmd(Cmd::SetParkInset(10));
+        assert_eq!(engine.config.park_inset_px, 40);
+        assert_eq!(host.state().park_span, 40);
+        engine.on_cmd(Cmd::SetParkInset(500));
+        assert_eq!(engine.config.park_inset_px, 400);
+        engine.flush_config();
+        let loaded = Config::load_or_create(dir.path()).unwrap();
+        assert_eq!(loaded.park_inset_px, 400);
+
+        engine.on_cmd(Cmd::SetParkInset(80));
+        host.warp(1919, 400);
+        engine.apply(vec![ControlCommand::ParkCursor]);
+        assert_eq!(host.cursor_pos(), Some((1840, 400)));
+        assert_eq!(host.state().park_span, 80);
     }
 
     #[test]

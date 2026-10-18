@@ -65,6 +65,10 @@ impl Host for WindowsHost {
         capture::set_remote(enabled, park_x, park_y);
     }
 
+    fn set_park_span(&self, span: i32) {
+        capture::set_park_span(span);
+    }
+
     fn set_hotkeys(&self, chords: Vec<(Chord, HotAction)>) {
         *self.hotkeys.lock().expect("hotkeys") = chords.clone();
         capture::set_hotkeys(chords);

@@ -20,7 +20,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 use crate::local_keys::{LocalKeyState, MODIFIER_VKS};
-use crate::park_clip::CLIP_SPAN;
+use crate::park_clip::CLIP_SPAN as DEFAULT_PARK_SPAN;
 use crate::remote_motion::should_forward_remote_motion;
 use crate::windows::display::list;
 use crate::InputEvent;
@@ -42,6 +42,15 @@ struct Shared {
 
 static SHARED: OnceLock<Shared> = OnceLock::new();
 static MONO_START: OnceLock<Instant> = OnceLock::new();
+static PARK_SPAN: AtomicI32 = AtomicI32::new(DEFAULT_PARK_SPAN);
+
+pub fn set_park_span(span: i32) {
+    PARK_SPAN.store(span, Ordering::SeqCst);
+}
+
+fn park_span() -> i32 {
+    PARK_SPAN.load(Ordering::SeqCst)
+}
 static THREAD: AtomicU32 = AtomicU32::new(0);
 static MOUSE_HOOK: AtomicIsizePtr = AtomicIsizePtr::new();
 static KEY_HOOK: AtomicIsizePtr = AtomicIsizePtr::new();
@@ -92,11 +101,12 @@ pub fn set_remote(enabled: bool, park_x: i32, park_y: i32) {
                 "set_remote(true)"
             );
             crate::windows::cursor::warp(park_x, park_y);
+            let span = park_span();
             crate::windows::cursor::clip(Some((
-                park_x.saturating_sub(CLIP_SPAN),
-                park_y.saturating_sub(CLIP_SPAN),
-                CLIP_SPAN * 2,
-                CLIP_SPAN * 2,
+                park_x.saturating_sub(span),
+                park_y.saturating_sub(span),
+                span * 2,
+                span * 2,
             )));
             crate::windows::cursor::hide();
         } else {
@@ -212,7 +222,7 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
                 let park_x = shared.park_x.load(Ordering::SeqCst);
                 let park_y = shared.park_y.load(Ordering::SeqCst);
                 let ms_since = ms_since_remote_enabled(shared);
-                if !should_forward_remote_motion(x, y, park_x, park_y, ms_since) {
+                if !should_forward_remote_motion(x, y, park_x, park_y, park_span(), ms_since) {
                     (0, 0)
                 } else {
                     (x - park_x, y - park_y)

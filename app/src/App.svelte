@@ -472,6 +472,37 @@
           <option value="proportional">Stretch to fit</option>
         </select>
       </label>
+      <div class="park-inset">
+        <label>
+          Parked cursor distance from the border: {snap.park_inset_px} px
+          <input
+            type="range"
+            min="40"
+            max="400"
+            step="10"
+            value={snap.park_inset_px}
+            onchange={(e) => send({ SetParkInset: Number(e.currentTarget.value) }).then(refresh)}
+          />
+          <input
+            type="number"
+            min="40"
+            max="400"
+            step="10"
+            value={snap.park_inset_px}
+            onchange={(e) => send({ SetParkInset: Number(e.currentTarget.value) }).then(refresh)}
+          />
+        </label>
+        <p class="muted">
+          How far inside the border of this screen the cursor waits while you control another computer.
+          Smaller = closer to the border, but very small values can swallow very fast mouse movement.
+        </p>
+        <button
+          type="button"
+          onclick={() => send({ SetParkInset: 160 }).then(refresh)}
+        >
+          Reset to 160
+        </button>
+      </div>
       <div class="card scrolling-card">
         <h3>Scrolling</h3>
         <label class="check">
@@ -640,6 +671,10 @@
   .status { margin-top: 24px; color: #9aa0ab; font-size: 13px; }
   .error { color: #ff8d8d; }
   .card { background: #181a1f; padding: 16px; border-radius: 12px; margin-bottom: 16px; }
+  .park-inset { margin: 12px 0; }
+  .park-inset label { display: block; }
+  .park-inset input[type="range"] { display: block; width: 100%; max-width: 320px; margin: 8px 0; }
+  .park-inset input[type="number"] { width: 5em; margin-left: 8px; }
   .scrolling-card h3 { margin: 0 0 12px; font-size: 1rem; font-weight: 600; }
   .scrolling-card label { display: block; margin-bottom: 10px; }
   .code { font-size: 32px; letter-spacing: 6px; margin: 0; }
