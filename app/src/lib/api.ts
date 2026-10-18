@@ -54,6 +54,7 @@ export type Snapshot = {
   clipboard_sync: boolean;
   modifiers: { alt_cmd: boolean; win_option: boolean };
   scroll: { natural: boolean; speed: number };
+  cross_mode: "layout" | "proportional";
   hotkeys: Hotkeys;
   peers: Peer[];
   monitors: Monitor[];
@@ -75,6 +76,7 @@ export type Cmd =
   | { SetClipboard: boolean }
   | { SetModifiers: { alt_cmd: boolean; win_option: boolean } }
   | { SetScroll: { natural: boolean; speed: number } }
+  | { SetCrossMode: "layout" | "proportional" }
   | { ConfirmPair: { id: string; code: string } }
   | { PairByCode: string }
   | { RejectPair: string }
@@ -97,6 +99,7 @@ let mock: Snapshot = {
   clipboard_sync: true,
   modifiers: { alt_cmd: true, win_option: true },
   scroll: { natural: false, speed: 1 },
+  cross_mode: "layout",
   hotkeys: {
     next_monitor: "ctrl+alt+right",
     prev_monitor: "ctrl+alt+left",
@@ -224,6 +227,7 @@ function applyMock(cmd: Cmd) {
   else if ("SetClipboard" in cmd) mock.clipboard_sync = cmd.SetClipboard;
   else if ("SetModifiers" in cmd) mock.modifiers = cmd.SetModifiers;
   else if ("SetScroll" in cmd) mock.scroll = cmd.SetScroll;
+  else if ("SetCrossMode" in cmd) mock.cross_mode = cmd.SetCrossMode;
   else if ("SetHotkey" in cmd) {
     const key = cmd.SetHotkey.action as keyof Hotkeys;
     if (key in mock.hotkeys) mock.hotkeys[key] = cmd.SetHotkey.chord;

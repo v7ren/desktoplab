@@ -3,8 +3,8 @@
 use std::collections::HashSet;
 
 use hop_core::{
-    cross, denormalize, hop_monitors, normalize, reading_order, DeviceId, HopAction, HopMode,
-    Layout, MonitorId, NormPos, PhysRect, PositionMemory,
+    cross_with_mode, denormalize, hop_monitors, normalize, reading_order, CrossMode, DeviceId,
+    HopAction, HopMode, Layout, MonitorId, NormPos, PhysRect, PositionMemory,
 };
 
 #[derive(Clone, Debug)]
@@ -74,6 +74,7 @@ pub fn on_motion(
     dy: i32,
     paused: bool,
     online: &HashSet<DeviceId>,
+    cross_mode: CrossMode,
 ) -> MotionEffect {
     let Some(current) = layout.monitor(&session.monitor).cloned() else {
         return MotionEffect::Stay;
@@ -92,7 +93,7 @@ pub fn on_motion(
     let Some((ox, oy)) = pushed_outside(current.bounds, x, y, dx, dy) else {
         return MotionEffect::Stay;
     };
-    let Some(arrival) = cross(layout, &current.id, ox, oy) else {
+    let Some(arrival) = cross_with_mode(layout, &current.id, ox, oy, cross_mode) else {
         return MotionEffect::Stay;
     };
     if arrival.device_id == session.device {
@@ -240,7 +241,17 @@ mod tests {
         );
         let mut session = session();
         session.ny = 0.75;
-        let effect = on_motion(&layout, &mut session, 99, 150, 4, 0, false, &HashSet::new());
+        let effect = on_motion(
+            &layout,
+            &mut session,
+            99,
+            150,
+            4,
+            0,
+            false,
+            &HashSet::new(),
+            CrossMode::Proportional,
+        );
         match effect {
             MotionEffect::Warp { monitor, y, .. } => {
                 assert_eq!(monitor.0, "b");
@@ -261,7 +272,17 @@ mod tests {
         );
         let mut online = HashSet::new();
         online.insert(DeviceId("laptop".into()));
-        let effect = on_motion(&layout, &mut session(), 99, 40, 3, 0, false, &online);
+        let effect = on_motion(
+            &layout,
+            &mut session(),
+            99,
+            40,
+            3,
+            0,
+            false,
+            &online,
+            CrossMode::Proportional,
+        );
         match effect {
             MotionEffect::Handoff { peer, .. } => assert_eq!(peer.0, "laptop"),
             other => panic!("expected handoff, got {other:?}"),
@@ -280,11 +301,31 @@ mod tests {
         let mut locked = session();
         locked.locked = true;
         assert_eq!(
-            on_motion(&layout, &mut locked, 99, 40, 5, 0, false, &HashSet::new()),
+            on_motion(
+                &layout,
+                &mut locked,
+                99,
+                40,
+                5,
+                0,
+                false,
+                &HashSet::new(),
+                CrossMode::Proportional,
+            ),
             MotionEffect::Stay
         );
         assert_eq!(
-            on_motion(&layout, &mut session(), 99, 40, 5, 0, true, &HashSet::new()),
+            on_motion(
+                &layout,
+                &mut session(),
+                99,
+                40,
+                5,
+                0,
+                true,
+                &HashSet::new(),
+                CrossMode::Proportional,
+            ),
             MotionEffect::Stay
         );
     }

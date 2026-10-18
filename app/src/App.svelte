@@ -85,6 +85,48 @@
     return slash >= 0 ? name.slice(slash + 1) : name;
   }
 
+  const SNAP_LAYOUT = 240;
+
+  function snapMonitorPosition(
+    id: string,
+    x: number,
+    y: number,
+    monitors: Snapshot["monitors"],
+    shiftKey: boolean,
+  ): { x: number; y: number } {
+    if (shiftKey) return { x, y };
+    const self = monitors.find((item) => item.id === id);
+    if (!self) return { x, y };
+    let nx = x;
+    let ny = y;
+    const w = self.width;
+    const h = self.height;
+    for (const other of monitors) {
+      if (other.id === id) continue;
+      const oR = other.x + other.width;
+      const oB = other.y + other.height;
+      const oCx = other.x + other.width / 2;
+      const oCy = other.y + other.height / 2;
+      let sR = nx + w;
+      let sB = ny + h;
+      const sCx = nx + w / 2;
+      const sCy = ny + h / 2;
+      if (Math.abs(nx - oR) < SNAP_LAYOUT) nx = oR;
+      if (Math.abs(sR - other.x) < SNAP_LAYOUT) nx = other.x - w;
+      if (Math.abs(ny - oB) < SNAP_LAYOUT) ny = oB;
+      if (Math.abs(sB - other.y) < SNAP_LAYOUT) ny = other.y - h;
+      if (Math.abs(ny - other.y) < SNAP_LAYOUT) ny = other.y;
+      if (Math.abs(sCy - oCy) < SNAP_LAYOUT) ny = oCy - h / 2;
+      if (Math.abs(sB - oB) < SNAP_LAYOUT) ny = oB - h;
+      if (Math.abs(nx - other.x) < SNAP_LAYOUT) nx = other.x;
+      if (Math.abs(sCx - oCx) < SNAP_LAYOUT) nx = oCx - w / 2;
+      if (Math.abs(sR - oR) < SNAP_LAYOUT) nx = oR - w;
+      sR = nx + w;
+      sB = ny + h;
+    }
+    return { x: Math.round(nx), y: Math.round(ny) };
+  }
+
   function onMonitorPointer(event: PointerEvent, id: string) {
     const target = event.currentTarget as HTMLElement;
     target.setPointerCapture(event.pointerId);
@@ -101,8 +143,12 @@
     drag = { id, x: originX, y: originY };
     const move = (ev: PointerEvent) => {
       if (ended) return;
-      latestX = Math.round(originX + (ev.clientX - startX) * 12);
-      latestY = Math.round(originY + (ev.clientY - startY) * 12);
+      const rawX = Math.round(originX + (ev.clientX - startX) * 12);
+      const rawY = Math.round(originY + (ev.clientY - startY) * 12);
+      const monitors = snap?.monitors ?? [];
+      const snapped = snapMonitorPosition(id, rawX, rawY, monitors, ev.shiftKey);
+      latestX = snapped.x;
+      latestY = snapped.y;
       drag = { id, x: latestX, y: latestY };
       if (throttle) return;
       throttle = setTimeout(() => {
@@ -230,6 +276,18 @@
       </label>
       <label class="check"><input type="checkbox" checked={snap.wrap} onchange={(e) => send({ SetWrap: e.currentTarget.checked }).then(refresh)} /> Wrap around this computer</label>
       <label class="check"><input type="checkbox" checked={snap.paused} onchange={(e) => send({ SetPaused: e.currentTarget.checked }).then(refresh)} /> Pause crossing</label>
+      <label>Crossing
+        <select
+          value={snap.cross_mode}
+          onchange={(e) =>
+            send({
+              SetCrossMode: e.currentTarget.value === "proportional" ? "proportional" : "layout",
+            }).then(refresh)}
+        >
+          <option value="layout">Match layout (recommended)</option>
+          <option value="proportional">Stretch to fit</option>
+        </select>
+      </label>
       <button
         type="button"
         class="reset-layout"

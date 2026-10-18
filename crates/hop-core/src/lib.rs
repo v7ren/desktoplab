@@ -11,7 +11,7 @@ pub mod layout;
 pub mod mapping;
 
 pub use control::{ControlCommand, ControlEvent, ControlMachine, Phase};
-pub use edge::{cross, Arrival, MAX_GAP_PX};
+pub use edge::{cross, cross_with_mode, Arrival, CrossMode, MAX_GAP_PX};
 pub use hop::{
     denormalize, hop as hop_monitors, normalize, place, reading_order, HopAction, HopMode, NormPos,
     PositionMemory,

@@ -3,7 +3,7 @@
 use std::fs;
 use std::path::Path;
 
-use hop_core::{Chord, HopMode, HotAction, ModifierMap, ScrollNorm};
+use hop_core::{Chord, CrossMode, HopMode, HotAction, ModifierMap, ScrollNorm};
 use serde::{Deserialize, Serialize};
 
 use crate::hotkeys::expand;
@@ -19,6 +19,8 @@ pub struct Config {
     pub clipboard_sync: bool,
     pub modifiers: ModifierMap,
     pub scroll: ScrollNorm,
+    #[serde(default = "default_cross_mode")]
+    pub cross_mode: CrossMode,
     pub port: u16,
     /// Announce this computer and look for others on the LAN. Off only in
     /// tests, so test runs never show up as computers on a real network.
@@ -28,6 +30,10 @@ pub struct Config {
 
 fn yes() -> bool {
     true
+}
+
+fn default_cross_mode() -> CrossMode {
+    CrossMode::Layout
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -71,6 +77,7 @@ impl Default for Config {
             clipboard_sync: true,
             modifiers: ModifierMap::default(),
             scroll: ScrollNorm::default(),
+            cross_mode: CrossMode::Layout,
             port: 42424,
             discovery: true,
         }

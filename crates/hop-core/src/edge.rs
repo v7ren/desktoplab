@@ -8,6 +8,14 @@
 use crate::layout::{
     horizontal_overlap, vertical_overlap, DeviceId, Layout, Monitor, MonitorId, PhysRect, Side,
 };
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CrossMode {
+    Proportional,
+    Layout,
+}
 
 /// How far apart two facing edges may be and still count as touching.
 pub const MAX_GAP_PX: i32 = 80;
@@ -28,13 +36,23 @@ pub struct Arrival {
 /// Map an attempted cursor position that may lie outside `from`.
 /// Returns `None` when the point is still inside, or when the edge leads nowhere.
 pub fn cross(layout: &Layout, from: &MonitorId, x: i32, y: i32) -> Option<Arrival> {
+    cross_with_mode(layout, from, x, y, CrossMode::Proportional)
+}
+
+pub fn cross_with_mode(
+    layout: &Layout,
+    from: &MonitorId,
+    x: i32,
+    y: i32,
+    mode: CrossMode,
+) -> Option<Arrival> {
     let source = layout.monitor(from)?;
     let side = outside_side(source.bounds, x, y)?;
-    if let Some(arrival) = arrive(layout, source, side, x, y) {
+    if let Some(arrival) = arrive(layout, source, side, x, y, mode) {
         return Some(arrival);
     }
     if let Some(other) = secondary_side(source.bounds, x, y, side) {
-        if let Some(arrival) = arrive(layout, source, other, x, y) {
+        if let Some(arrival) = arrive(layout, source, other, x, y, mode) {
             return Some(arrival);
         }
     }
@@ -104,22 +122,31 @@ fn secondary_side(bounds: PhysRect, x: i32, y: i32, primary: Side) -> Option<Sid
     candidate.filter(|side| *side != primary)
 }
 
-fn arrive(layout: &Layout, source: &Monitor, side: Side, x: i32, y: i32) -> Option<Arrival> {
+fn arrive(
+    layout: &Layout,
+    source: &Monitor,
+    side: Side,
+    x: i32,
+    y: i32,
+    mode: CrossMode,
+) -> Option<Arrival> {
     let mut neighbors = neighbors(layout, source, side);
     if neighbors.is_empty() {
         return None;
     }
     neighbors.sort_by_key(|m| along_origin(m.bounds, side));
     let coord = along_coord(side, x, y);
-    let target = if neighbors.len() == 1 {
-        neighbors[0]
-    } else {
-        pick_overlapping(&neighbors, side, coord)?
+    let target = match mode {
+        CrossMode::Proportional if neighbors.len() == 1 => neighbors[0],
+        CrossMode::Proportional => pick_overlapping(&neighbors, side, coord)?,
+        CrossMode::Layout => pick_overlapping(&neighbors, side, coord)?,
     };
-    let t = if neighbors.len() == 1 {
-        fraction_along(source.bounds, side, coord)
-    } else {
-        fraction_in_overlap(source.bounds, target.bounds, side, coord)
+    let t = match mode {
+        CrossMode::Proportional if neighbors.len() == 1 => {
+            fraction_along(source.bounds, side, coord)
+        }
+        CrossMode::Proportional => fraction_in_overlap(source.bounds, target.bounds, side, coord),
+        CrossMode::Layout => fraction_on_target(target.bounds, side, coord),
     };
     let (px, py) = point_on_edge(target.bounds, side.opposite(), t);
     Some(Arrival {
@@ -130,6 +157,12 @@ fn arrive(layout: &Layout, source: &Monitor, side: Side, x: i32, y: i32) -> Opti
         side,
         t,
     })
+}
+
+fn fraction_on_target(target: PhysRect, side: Side, coord: i32) -> f64 {
+    let origin = along_origin(target, side);
+    let len = along_len(target, side).max(1);
+    ((coord - origin) as f64 / len as f64).clamp(0.0, 1.0)
 }
 
 fn neighbors<'a>(layout: &'a Layout, source: &Monitor, side: Side) -> Vec<&'a Monitor> {
@@ -462,5 +495,69 @@ mod tests {
         let hit = cross(&l, &MonitorId("a".into()), 100, 50).unwrap();
         assert_eq!(hit.device_id.0, "laptop");
         assert_eq!(hit.monitor.0, "p");
+    }
+
+    #[test]
+    fn layout_mode_keeps_absolute_y_on_mismatched_heights() {
+        let l = layout(
+            false,
+            vec![
+                mon("pc", "local", 0, 100, 800, 600, 1.0),
+                mon("mac", "peer", 800, 0, 800, 400, 1.0),
+            ],
+        );
+        let hit =
+            cross_with_mode(&l, &MonitorId("pc".into()), 800, 250, CrossMode::Layout).unwrap();
+        assert_eq!(hit.monitor.0, "mac");
+        assert!((hit.y - 250).abs() <= 1, "y={}", hit.y);
+        assert!(
+            cross_with_mode(&l, &MonitorId("pc".into()), 800, 450, CrossMode::Layout).is_none()
+        );
+        let back =
+            cross_with_mode(&l, &MonitorId("mac".into()), 799, 250, CrossMode::Layout).unwrap();
+        assert_eq!(back.monitor.0, "pc");
+        assert!((back.y - 250).abs() <= 1, "y={}", back.y);
+    }
+
+    #[test]
+    fn layout_mode_l_shape_still_picks_by_overlap() {
+        let l = layout(
+            false,
+            vec![
+                mon("a", "local", 0, 0, 100, 200, 1.0),
+                mon("top", "local", 100, 0, 100, 100, 1.0),
+                mon("bot", "local", 100, 100, 100, 100, 1.0),
+            ],
+        );
+        let upper =
+            cross_with_mode(&l, &MonitorId("a".into()), 100, 20, CrossMode::Layout).unwrap();
+        assert_eq!(upper.monitor.0, "top");
+        assert_eq!(upper.y, 20);
+        let lower =
+            cross_with_mode(&l, &MonitorId("a".into()), 100, 150, CrossMode::Layout).unwrap();
+        assert_eq!(lower.monitor.0, "bot");
+        assert_eq!(lower.y, 150);
+    }
+
+    #[test]
+    fn proportional_mode_unchanged_for_mismatched_heights() {
+        let l = layout(
+            false,
+            vec![
+                mon("tall", "local", 0, 0, 100, 200, 1.0),
+                mon("short", "local", 100, 0, 80, 100, 1.0),
+            ],
+        );
+        let hit = cross_with_mode(
+            &l,
+            &MonitorId("tall".into()),
+            100,
+            150,
+            CrossMode::Proportional,
+        )
+        .unwrap();
+        assert!((hit.t - 0.75).abs() < 0.02);
+        let expected_y = (0.75_f64 * 99.0).round() as i32;
+        assert!((hit.y - expected_y).abs() <= 1);
     }
 }

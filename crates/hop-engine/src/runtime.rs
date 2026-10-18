@@ -1,8 +1,9 @@
 //! Process entry. Local hops, remote control, clipboard, and the network thread.
 
 use hop_core::{
-    denormalize, normalize, translate_hid, ControlCommand, ControlEvent, ControlMachine, Device,
-    DeviceId, HopMode, HostOs, Layout, ModifierMap, Monitor, MonitorId, PhysRect, ScrollNorm,
+    denormalize, normalize, translate_hid, ControlCommand, ControlEvent, ControlMachine, CrossMode,
+    Device, DeviceId, HopMode, HostOs, Layout, ModifierMap, Monitor, MonitorId, PhysRect,
+    ScrollNorm,
 };
 use hop_net::Identity;
 use hop_platform::{install, ClipboardItem, DisplayInfo, Host, InputEvent};
@@ -95,6 +96,7 @@ pub struct Snapshot {
     pub clipboard_sync: bool,
     pub modifiers: ModifierMap,
     pub scroll: ScrollNorm,
+    pub cross_mode: CrossMode,
     pub hotkeys: crate::config::HotkeyConfig,
     pub peers: Vec<PeerView>,
     pub monitors: Vec<MonitorView>,
@@ -117,6 +119,7 @@ pub enum Cmd {
     SetClipboard(bool),
     SetModifiers(ModifierMap),
     SetScroll(ScrollNorm),
+    SetCrossMode(CrossMode),
     ConfirmPair { id: String, code: String },
     PairByCode(String),
     RejectPair(String),
@@ -511,6 +514,7 @@ impl Engine {
             dy,
             self.config.paused,
             &online,
+            self.config.cross_mode,
         ) {
             MotionEffect::Stay => {}
             MotionEffect::Warp { x, y, monitor } => {
@@ -553,6 +557,7 @@ impl Engine {
             dy,
             false,
             &online,
+            self.config.cross_mode,
         ) {
             MotionEffect::Stay => {}
             MotionEffect::Warp { x, y, monitor } => {
@@ -689,6 +694,10 @@ impl Engine {
             }
             Cmd::SetScroll(scroll) => {
                 self.config.scroll = scroll;
+                save_config = true;
+            }
+            Cmd::SetCrossMode(mode) => {
+                self.config.cross_mode = mode;
                 save_config = true;
             }
             Cmd::ConfirmPair { id, code } => {
@@ -1376,6 +1385,7 @@ impl Engine {
             clipboard_sync: self.config.clipboard_sync,
             modifiers: self.config.modifiers,
             scroll: self.config.scroll,
+            cross_mode: self.config.cross_mode,
             hotkeys: self.config.hotkeys.clone(),
             peers,
             monitors: self.layout.monitors.iter().map(monitor_view).collect(),
@@ -1543,6 +1553,7 @@ fn empty_snapshot() -> Snapshot {
         clipboard_sync: true,
         modifiers: ModifierMap::default(),
         scroll: ScrollNorm::default(),
+        cross_mode: CrossMode::Layout,
         hotkeys: crate::config::HotkeyConfig::default(),
         peers: Vec::new(),
         monitors: Vec::new(),
@@ -2379,6 +2390,9 @@ mod tests {
             test_monitor("pc:1", "pc", 0, 0, 1920, 1080),
             test_monitor("mac:1", "mac", 1920, 0, 1920, 1440),
         ]);
+        // R2: taller Mac beside PC — return height is proportional, not layout-Y.
+        pair.a.config.cross_mode = CrossMode::Proportional;
+        pair.b.config.cross_mode = CrossMode::Proportional;
         make_a_control_b(&mut pair, "mac:1");
         assert_eq!(pair.a.controlling().as_deref(), Some("mac"));
         assert_eq!(pair.b.controller.as_deref(), Some("pc"));
@@ -2742,6 +2756,9 @@ mod tests {
             vec![display("1", 0, 0, 1920, 1080)],
             vec![display("1", 0, 0, 1920, 1440)],
         );
+        // Same-height default sync; return uses proportional mapping (see controlled_cursor test).
+        pair.a.config.cross_mode = CrossMode::Proportional;
+        pair.b.config.cross_mode = CrossMode::Proportional;
         pair.a_host.warp(1919, 809);
         pair.a.on_motion(1919, 809, 5, 0);
         pump(&mut pair);
@@ -3167,5 +3184,130 @@ mod tests {
             .unwrap()
             .bounds;
         assert_eq!(before, after);
+    }
+
+    fn pair_with_vertical_offset() -> PeerPair {
+        let mut pair = pair_via_layout_exchange(
+            vec![display("1", 0, 100, 800, 600)],
+            vec![display("1", 0, 0, 800, 400)],
+        );
+        let pc_mon = pair
+            .a
+            .layout
+            .monitors
+            .iter()
+            .find(|m| m.device_id.0 == "a")
+            .unwrap()
+            .bounds;
+        for remote in pair.a.layout.monitors.iter_mut() {
+            if remote.device_id.0 == "b" {
+                remote.bounds.x = pc_mon.right();
+                remote.bounds.y = pc_mon.y;
+            }
+        }
+        pair.a.persist_peer_layouts();
+        pair.a.broadcast_layout();
+        pump(&mut pair);
+        pair
+    }
+
+    #[test]
+    fn layout_cross_mode_preserves_absolute_y_across_mismatched_heights() {
+        let mut pair = pair_with_vertical_offset();
+        pair.a.config.cross_mode = CrossMode::Layout;
+        pair.b.config.cross_mode = CrossMode::Layout;
+
+        let mut overhang = pair_with_vertical_offset();
+        overhang.a.config.cross_mode = CrossMode::Layout;
+        // PC y=100..700, Mac y=100..500 — y=550 is below the shared vertical span.
+        overhang.a_host.warp(799, 550);
+        overhang.a.on_motion(799, 550, 5, 0);
+        pump(&mut overhang);
+        assert_eq!(overhang.a.controlling(), None, "overhang must not cross");
+
+        let layout_y = 250;
+        let mac_layout_top = pair
+            .a
+            .layout
+            .monitors
+            .iter()
+            .find(|m| m.device_id.0 == "b")
+            .unwrap()
+            .bounds
+            .y;
+        let mac_physical_y = layout_y - mac_layout_top;
+
+        pair.a_host.warp(799, layout_y);
+        pair.a.on_motion(799, layout_y, 5, 0);
+        pump(&mut pair);
+        assert_eq!(pair.a.controlling().as_deref(), Some("b"));
+        let (_, cy) = pair.b_host.cursor_pos().unwrap();
+        assert!(
+            (cy - mac_physical_y).abs() <= 2,
+            "mac physical y={cy}, expected {mac_physical_y}"
+        );
+
+        let mac_bounds = pair
+            .b
+            .layout
+            .monitors
+            .iter()
+            .find(|m| m.device_id.0 == "b")
+            .unwrap()
+            .bounds;
+        pair.b_host.warp(mac_bounds.x + 1, mac_physical_y);
+        pair.b.on_net(NetEvt::Datagram {
+            peer: "a".into(),
+            bytes: motion_bytes(-5, 0),
+        });
+        pump(&mut pair);
+        let (_, ay) = pair.a_host.cursor_pos().unwrap();
+        assert!(
+            (ay - layout_y).abs() <= 2,
+            "pc layout/physical y={ay}, expected {layout_y}"
+        );
+    }
+
+    #[test]
+    fn proportional_cross_mode_still_stretches_across_mismatched_heights() {
+        let mut pair = pair_with_vertical_offset();
+        pair.a.config.cross_mode = CrossMode::Proportional;
+        pair.b.config.cross_mode = CrossMode::Proportional;
+        pair.a_host.warp(799, 450);
+        pair.a.on_motion(799, 450, 5, 0);
+        pump(&mut pair);
+        assert_eq!(pair.a.controlling().as_deref(), Some("b"));
+        let (_, cy) = pair.b_host.cursor_pos().unwrap();
+        assert!(
+            (cy - 450).abs() > 20,
+            "proportional mode should not preserve layout y=450, got y={cy}"
+        );
+    }
+
+    #[test]
+    fn set_cross_mode_persists_in_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config {
+            discovery: false,
+            port: 47980,
+            cross_mode: CrossMode::Proportional,
+            ..Config::default()
+        };
+        config.save(dir.path()).unwrap();
+        let host = Arc::new(MockHost::new(vec![DisplayInfo {
+            id: "1".into(),
+            name: "Main".into(),
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 1080,
+            scale: 1.0,
+            primary: true,
+        }]));
+        let (mut engine, _host_results, _net) = test_engine(dir.path(), host);
+        engine.on_cmd(Cmd::SetCrossMode(CrossMode::Layout));
+        engine.flush_config();
+        let loaded = Config::load_or_create(dir.path()).unwrap();
+        assert_eq!(loaded.cross_mode, CrossMode::Layout);
     }
 }
