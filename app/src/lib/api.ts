@@ -285,7 +285,7 @@ function applyMock(cmd: Cmd) {
     });
   } else if ("MoveMonitor" in cmd) {
     const monitor = mock.monitors.find((item) => item.id === cmd.MoveMonitor.id);
-    if (monitor && monitor.device_id !== mock.device_id) {
+    if (monitor) {
       const block = cmd.MoveMonitor.block ?? false;
       const dx = cmd.MoveMonitor.x - monitor.x;
       const dy = cmd.MoveMonitor.y - monitor.y;

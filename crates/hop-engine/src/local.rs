@@ -1,4 +1,9 @@
 //! Local hops and DPI-proportional crossing. Pure: the engine applies the effect.
+//!
+//! Geometry here is virtual layout space. The engine converts host (physical) pointer
+//! positions into this space before calling `on_motion`, and converts warps back to
+//! physical pixels. OS display arrangement still governs everyday movement on the
+//! local machine; virtual bounds govern DevHop crossing and controlled hops.
 
 use std::collections::HashSet;
 

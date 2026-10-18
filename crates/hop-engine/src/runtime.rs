@@ -1219,15 +1219,32 @@ impl Engine {
         let Some(monitor) = self.layout.monitors.iter().find(|m| m.id.0 == id).cloned() else {
             return;
         };
-        if monitor.device_id == device {
-            return;
-        }
-        let peer_device = monitor.device_id.clone();
         let dx = x - monitor.bounds.x;
         let dy = y - monitor.bounds.y;
         if dx == 0 && dy == 0 {
             return;
         }
+        if monitor.device_id == device {
+            // Editor moves only virtual `bounds`; `phys` stays the OS arrangement.
+            // While DevHop is idle locally, the OS still hops across physical displays.
+            // Virtual layout defines edge crossing onto peers and hops while controlled.
+            if block {
+                for local in self.layout.monitors.iter_mut() {
+                    if local.device_id == device {
+                        local.bounds.x = local.bounds.x.saturating_add(dx);
+                        local.bounds.y = local.bounds.y.saturating_add(dy);
+                    }
+                }
+            } else if let Some(local) = self.layout.monitors.iter_mut().find(|m| m.id.0 == id) {
+                local.bounds.x = x;
+                local.bounds.y = y;
+            }
+            let _ = save_local_overrides(&self.dir, &self.layout, &device);
+            self.broadcast_layout();
+            self.mark_snapshot_dirty();
+            return;
+        }
+        let peer_device = monitor.device_id.clone();
         if block {
             for remote in self.layout.monitors.iter_mut() {
                 if remote.device_id == peer_device {
@@ -1241,6 +1258,7 @@ impl Engine {
         }
         self.persist_peer_layouts();
         self.broadcast_layout();
+        self.mark_snapshot_dirty();
     }
 
     fn refresh_local_monitors(&mut self, displays: &[DisplayInfo], clear_virtual: bool) {
@@ -2774,6 +2792,13 @@ mod tests {
         ]
     }
 
+    fn pc_dual_displays() -> Vec<DisplayInfo> {
+        vec![
+            display_at("1", 0, 0, 1920, 1080, true),
+            display_at("2", 1920, 0, 1920, 1080, false),
+        ]
+    }
+
     fn monitor_bounds(layout: &Layout, device: &str, display_suffix: &str) -> PhysRect {
         layout
             .monitors
@@ -3486,23 +3511,143 @@ mod tests {
     }
 
     #[test]
-    fn move_monitor_on_local_id_is_ignored() {
-        let mut pair = pair_via_layout_exchange(
-            vec![display("1", 0, 0, 1920, 1080)],
-            vec![display("1", 0, 0, 1920, 1080)],
-        );
-        while pair.a_net.try_recv().is_ok() {}
-        let before = pair.a.layout.clone();
-        let files = saved_layout_file_count(pair._a_dir.path());
+    fn local_virtual_single_move_persists_broadcasts_and_peer_sees_arrangement() {
+        let mut pair =
+            pair_via_layout_exchange(pc_dual_displays(), vec![display("1", 0, 0, 1920, 1080)]);
+        let before_phys = pair
+            .a
+            .layout
+            .monitor(&MonitorId("a:2".into()))
+            .unwrap()
+            .physical_bounds();
+        let m2 = monitor_bounds(&pair.a.layout, "a", "2");
         pair.a.on_cmd(Cmd::MoveMonitor {
-            id: "a:1".into(),
-            x: 10_000,
-            y: 10_000,
+            id: "a:2".into(),
+            x: m2.x,
+            y: m2.y - 200,
             block: false,
         });
-        assert_eq!(pair.a.layout, before);
-        assert_eq!(saved_layout_file_count(pair._a_dir.path()), files);
-        assert!(pair.a_net.try_recv().is_err());
+        pump(&mut pair);
+        let after = pair.a.layout.monitor(&MonitorId("a:2".into())).unwrap();
+        assert_eq!(after.physical_bounds(), before_phys);
+        assert_eq!(after.bounds.y, m2.y - 200);
+        assert!(local_layout_file_exists(pair._a_dir.path()));
+        let a1 = monitor_bounds(&pair.a.layout, "a", "1");
+        let a2 = monitor_bounds(&pair.a.layout, "a", "2");
+        let b_a1 = monitor_bounds(&pair.b.layout, "a", "1");
+        let b_a2 = monitor_bounds(&pair.b.layout, "a", "2");
+        assert_eq!(a2.y - a1.y, b_a2.y - b_a1.y);
+        assert_eq!(a2.x - a1.x, b_a2.x - b_a1.x);
+    }
+
+    #[test]
+    fn local_virtual_raise_crosses_to_mac_at_layout_height() {
+        use crate::monitor_coords::layout_point_to_phys;
+
+        let mut pair =
+            pair_via_layout_exchange(pc_dual_displays(), vec![display("1", 0, 0, 1920, 1080)]);
+        let m2 = monitor_bounds(&pair.a.layout, "a", "2");
+        pair.a.on_cmd(Cmd::MoveMonitor {
+            id: "a:2".into(),
+            x: m2.x,
+            y: m2.y - 200,
+            block: false,
+        });
+        pump(&mut pair);
+        let a2 = monitor_bounds(&pair.a.layout, "a", "2");
+        let pc_max_r = pair
+            .a
+            .layout
+            .monitors
+            .iter()
+            .filter(|m| m.device_id.0 == "a")
+            .map(|m| m.bounds.right())
+            .max()
+            .unwrap();
+        if let Some(remote) = pair.a.layout.monitors.iter_mut().find(|m| m.id.0 == "b:1") {
+            remote.bounds.x = pc_max_r;
+            remote.bounds.y = a2.y;
+        }
+        pair.a.persist_peer_layouts();
+        pair.a.broadcast_layout();
+        pump(&mut pair);
+        pair.a.config.cross_mode = CrossMode::Layout;
+        pair.b.config.cross_mode = CrossMode::Layout;
+        let layout_y = 200;
+        let a2_id = MonitorId("a:2".into());
+        let (b1_phys_y, b1_bounds_y) = {
+            let b1 = pair.a.layout.monitor(&MonitorId("b:1".into())).unwrap();
+            (b1.physical_bounds().y, b1.bounds.y)
+        };
+        let expected_cy = b1_phys_y + (layout_y - b1_bounds_y);
+        let prime_lx = a2.x + 100;
+        let (prime_px, prime_py) = layout_point_to_phys(&pair.a.layout, &a2_id, prime_lx, layout_y);
+        pair.a_host.warp(prime_px, prime_py);
+        pair.a.on_motion(prime_px, prime_py, 1, 0);
+        let cross_lx = a2.right() - 1;
+        let (edge_px, edge_py) = layout_point_to_phys(&pair.a.layout, &a2_id, cross_lx, layout_y);
+        pair.a_host.warp(edge_px, edge_py);
+        pair.a.on_motion(edge_px, edge_py, 5, 0);
+        pump(&mut pair);
+        assert_eq!(pair.a.controlling().as_deref(), Some("b"));
+        let (_, cy) = pair.b_host.cursor_pos().unwrap();
+        assert!(
+            (cy - expected_cy).abs() <= 2,
+            "cy={cy}, expected {expected_cy} (b:1 phys.y={b1_phys_y} bounds.y={b1_bounds_y})"
+        );
+    }
+
+    #[test]
+    fn local_virtual_block_move_shifts_all_local_monitors() {
+        let mut pair =
+            pair_via_layout_exchange(pc_dual_displays(), vec![display("1", 0, 0, 1920, 1080)]);
+        let m1 = monitor_bounds(&pair.a.layout, "a", "1");
+        let m2 = monitor_bounds(&pair.a.layout, "a", "2");
+        pair.a.on_cmd(Cmd::MoveMonitor {
+            id: "a:1".into(),
+            x: m1.x,
+            y: m1.y + 60,
+            block: true,
+        });
+        pump(&mut pair);
+        assert_eq!(monitor_bounds(&pair.a.layout, "a", "1").y, m1.y + 60);
+        assert_eq!(monitor_bounds(&pair.a.layout, "a", "2").y, m2.y + 60);
+    }
+
+    #[test]
+    fn local_virtual_override_survives_restart_and_reset_clears() {
+        let mut pair =
+            pair_via_layout_exchange(pc_dual_displays(), vec![display("1", 0, 0, 1920, 1080)]);
+        let m2 = monitor_bounds(&pair.a.layout, "a", "2");
+        pair.a.on_cmd(Cmd::MoveMonitor {
+            id: "a:2".into(),
+            x: m2.x,
+            y: m2.y - 120,
+            block: false,
+        });
+        pump(&mut pair);
+        let virt = monitor_bounds(&pair.a.layout, "a", "2");
+        let dir = pair._a_dir.path().to_path_buf();
+        let (mut restarted, _host, _net, _dir2) =
+            named_engine_with_displays("a", pc_dual_displays());
+        restarted.dir = dir.clone();
+        restarted.peer_layouts = crate::layout_store::load_all(&dir);
+        for saved in restarted.peer_layouts.values() {
+            crate::layout_store::apply_saved(&mut restarted.layout, saved);
+        }
+        let local_overrides = crate::layout_store::load_local_overrides(&dir);
+        crate::layout_store::apply_local_overrides(
+            &mut restarted.layout,
+            &DeviceId("a".into()),
+            &local_overrides,
+        );
+        assert_eq!(monitor_bounds(&restarted.layout, "a", "2"), virt);
+
+        pair.a.on_cmd(Cmd::ResetLayout);
+        pump(&mut pair);
+        assert!(!local_layout_file_exists(pair._a_dir.path()));
+        let mon = pair.a.layout.monitor(&MonitorId("a:2".into())).unwrap();
+        assert_eq!(mon.bounds, mon.physical_bounds());
     }
 
     #[test]

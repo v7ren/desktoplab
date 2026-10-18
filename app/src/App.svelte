@@ -204,9 +204,7 @@
   }
 
   function onMonitorPointer(event: PointerEvent, id: string) {
-    if (!snap || snap.device_id === snap.monitors.find((item) => item.id === id)?.device_id) {
-      return;
-    }
+    if (!snap) return;
     const target = event.currentTarget as HTMLElement;
     target.setPointerCapture(event.pointerId);
     const startX = event.clientX;
@@ -398,6 +396,10 @@
       >
         Reset layout
       </button>
+      <p class="layout-legend muted" aria-label="Monitor colours">
+        <span class="legend-item"><span class="swatch swatch-local" aria-hidden="true"></span> This computer</span>
+        <span class="legend-item"><span class="swatch swatch-remote" aria-hidden="true"></span> Other computer</span>
+      </p>
       {@const shown = effectiveMonitors(snap.monitors)}
       {@const origin = layoutOrigin(shown)}
       {@const canvasSize = canvasPixelSize(shown)}
@@ -412,9 +414,8 @@
           <button
             class="monitor"
             class:remote={isRemote}
-            class:local={!isRemote}
             style="left:{box.left}px;top:{box.top}px;width:{box.width}px;height:{box.height}px"
-            onpointerdown={isRemote ? (event) => onMonitorPointer(event, monitor.id) : undefined}
+            onpointerdown={(event) => onMonitorPointer(event, monitor.id)}
           >
             {monitorLabel(monitor.name)}
           </button>
@@ -521,15 +522,32 @@
   input[aria-label="Pairing code"] { font-size: 28px; letter-spacing: 6px; max-width: 220px; }
   .reset-layout { margin-top: 12px; width: fit-content; }
   .canvas { position: relative; height: 420px; background: #181a1f; border-radius: 12px; overflow: auto; }
+  .layout-legend {
+    display: flex;
+    gap: 16px;
+    flex-wrap: wrap;
+    margin: 8px 0 4px;
+    font-size: 13px;
+  }
+  .legend-item { display: inline-flex; align-items: center; gap: 6px; }
+  .swatch {
+    display: inline-block;
+    width: 14px;
+    height: 14px;
+    border-radius: 3px;
+    border: 1px solid #6d84d6;
+  }
+  .swatch-local { background: #243056; }
+  .swatch-remote { background: #243828; border-color: #6db57a; }
   .monitor {
     position: absolute;
     background: #243056;
     border: 1px solid #6d84d6;
     border-radius: 6px;
+    cursor: grab;
   }
-  .monitor.remote { background: #243828; border-color: #6db57a; cursor: grab; }
-  .monitor.remote:active { cursor: grabbing; }
-  .monitor.local { cursor: not-allowed; opacity: 0.92; }
+  .monitor:active { cursor: grabbing; }
+  .monitor.remote { background: #243828; border-color: #6db57a; }
   ul { list-style: none; padding: 0; }
   li { display: flex; gap: 10px; align-items: center; padding: 10px 0; border-bottom: 1px solid #2a2d34; flex-wrap: wrap; }
   progress { width: 140px; }
