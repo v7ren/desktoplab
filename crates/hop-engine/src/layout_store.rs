@@ -36,6 +36,20 @@ pub fn load_all(dir: &Path) -> HashMap<String, Layout> {
     out
 }
 
+pub fn clear_all(dir: &Path) -> Result<(), String> {
+    let root = layouts_dir(dir);
+    if !root.is_dir() {
+        return Ok(());
+    }
+    for entry in fs::read_dir(&root).map_err(|e| e.to_string())?.flatten() {
+        let path = entry.path();
+        if path.extension().is_some_and(|ext| ext == "json") {
+            fs::remove_file(&path).map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
+}
+
 pub fn save_peer(dir: &Path, peer_id: &str, remote: &Layout) -> Result<(), String> {
     let root = layouts_dir(dir);
     fs::create_dir_all(&root).map_err(|e| e.to_string())?;
@@ -152,6 +166,40 @@ pub fn align_incoming_layout(
         monitors: translate_monitors(&received.monitors, dx, dy),
         wrap: received.wrap,
     })
+}
+
+/// One remote device's monitors in peer-native coordinates (block origin at min x/y).
+pub fn device_fragment_at_origin(layout: &Layout, remote: &DeviceId) -> Layout {
+    let monitors: Vec<Monitor> = layout
+        .monitors
+        .iter()
+        .filter(|m| &m.device_id == remote)
+        .cloned()
+        .collect();
+    if monitors.is_empty() {
+        return Layout {
+            devices: layout
+                .devices
+                .iter()
+                .filter(|d| &d.id == remote)
+                .cloned()
+                .collect(),
+            monitors: Vec::new(),
+            wrap: layout.wrap,
+        };
+    }
+    let min_x = monitors.iter().map(|m| m.bounds.x).min().unwrap_or(0);
+    let min_y = monitors.iter().map(|m| m.bounds.y).min().unwrap_or(0);
+    Layout {
+        devices: layout
+            .devices
+            .iter()
+            .filter(|d| &d.id == remote)
+            .cloned()
+            .collect(),
+        monitors: translate_monitors(&monitors, -min_x, -min_y),
+        wrap: layout.wrap,
+    }
 }
 
 pub fn merge_remote_into(local: &mut Layout, device: &DeviceId, incoming: Layout) {

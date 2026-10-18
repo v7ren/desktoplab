@@ -21,8 +21,8 @@ use crate::config::Config;
 use crate::dnd;
 use crate::host_worker::{spawn as spawn_host_worker, HostJob};
 use crate::layout_store::{
-    align_incoming_layout, apply_saved, default_place, load_all, merge_remote_into,
-    received_includes_local, remote_fragment, save_peer,
+    align_incoming_layout, apply_saved, clear_all, default_place, device_fragment_at_origin,
+    load_all, merge_remote_into, received_includes_local, remote_fragment, save_peer,
 };
 use crate::local::{on_hotkey, on_motion, LocalSession, MotionEffect};
 use crate::log::{self, Log};
@@ -126,6 +126,7 @@ pub enum Cmd {
     CancelTransfer(u64),
     OpenTransfer(u64),
     PromptPermissions,
+    ResetLayout,
 }
 
 #[derive(Clone, Debug)]
@@ -720,6 +721,7 @@ impl Engine {
                 }
             }
             Cmd::MoveMonitor { id, x, y } => self.move_monitor(&id, x, y),
+            Cmd::ResetLayout => self.reset_layout(),
             Cmd::CancelTransfer(id) => {
                 if self.transfers.cancel_flag(id) {
                     let _ = self.net.send(NetCmd::CancelTransfer(id));
@@ -1144,6 +1146,35 @@ impl Engine {
             let _ = save_peer(&self.dir, &peer_device, &fragment);
             self.peer_layouts.insert(peer_device.clone(), fragment);
         }
+    }
+
+    fn reset_layout(&mut self) {
+        let device = self.session.device.clone();
+        let remote_ids: Vec<DeviceId> = self
+            .layout
+            .devices
+            .iter()
+            .filter(|d| &d.id != &device)
+            .map(|d| d.id.clone())
+            .collect();
+        let fragments: Vec<(String, Layout)> = remote_ids
+            .iter()
+            .map(|id| (id.0.clone(), device_fragment_at_origin(&self.layout, id)))
+            .filter(|(_, layout)| !layout.monitors.is_empty())
+            .collect();
+        let _ = clear_all(&self.dir);
+        self.peer_layouts.clear();
+        let displays = self.host.list_displays();
+        self.refresh_local_monitors(&displays);
+        for (peer_id, fragment) in fragments {
+            let placed = default_place(&self.layout, &device, &peer_id, fragment);
+            merge_remote_into(&mut self.layout, &device, placed);
+        }
+        if !self.online.is_empty() {
+            self.broadcast_layout();
+        }
+        self.status = "layout reset".into();
+        self.mark_snapshot_dirty();
     }
 
     fn move_monitor(&mut self, id: &str, x: i32, y: i32) {
@@ -3005,5 +3036,136 @@ mod tests {
         });
         pump(&mut pair);
         assert_eq!(pair.a.controlling(), None);
+    }
+
+    fn saved_layout_file_count(dir: &std::path::Path) -> usize {
+        let root = crate::layout_store::layouts_dir(dir);
+        std::fs::read_dir(root)
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "json"))
+                    .count()
+            })
+            .unwrap_or(0)
+    }
+
+    #[test]
+    fn reset_layout_restores_default_mirror_and_allows_crossing() {
+        let mut pair = pair_via_layout_exchange(
+            vec![display("1", 0, 0, 1920, 1080)],
+            vec![display("1", 0, 0, 1920, 1080)],
+        );
+        let b_mon = pair
+            .a
+            .layout
+            .monitors
+            .iter()
+            .find(|m| m.device_id.0 == "b")
+            .unwrap()
+            .id
+            .0
+            .clone();
+        pair.a.on_cmd(Cmd::MoveMonitor {
+            id: b_mon,
+            x: 1920,
+            y: 200,
+        });
+        pump(&mut pair);
+        pair.a.on_cmd(Cmd::ResetLayout);
+        pump(&mut pair);
+        assert_eq!(
+            neighbor_device(&pair.a.layout, "a", Side::Right).as_deref(),
+            Some("b")
+        );
+        assert_eq!(
+            neighbor_device(&pair.b.layout, "b", Side::Left).as_deref(),
+            Some("a")
+        );
+        assert_eq!(saved_layout_file_count(pair._a_dir.path()), 0);
+
+        pair.a_host.warp(1919, 540);
+        pair.a.on_motion(1919, 540, 5, 0);
+        pump(&mut pair);
+        assert_eq!(pair.a.controlling().as_deref(), Some("b"));
+        let mac_left = pair
+            .b
+            .layout
+            .monitors
+            .iter()
+            .find(|m| m.device_id.0 == "b")
+            .unwrap()
+            .bounds
+            .x;
+        pair.b_host.warp(mac_left + 1, 540);
+        pair.b.on_net(NetEvt::Datagram {
+            peer: "a".into(),
+            bytes: motion_bytes(-5, 0),
+        });
+        pump(&mut pair);
+        assert_eq!(pair.a.controlling(), None);
+        assert_eq!(pair.b.controller, None);
+    }
+
+    #[test]
+    fn reset_layout_while_peer_offline_then_online_uses_default() {
+        let mut pair = pair_via_layout_exchange(
+            vec![display("1", 0, 0, 1920, 1080)],
+            vec![display("1", 0, 0, 1920, 1080)],
+        );
+        let b_mon = pair
+            .a
+            .layout
+            .monitors
+            .iter()
+            .find(|m| m.device_id.0 == "b")
+            .unwrap()
+            .id
+            .0
+            .clone();
+        pair.a.on_cmd(Cmd::MoveMonitor {
+            id: b_mon,
+            x: 1920,
+            y: 200,
+        });
+        pump(&mut pair);
+        pair.a.online.remove("b");
+        pair.a.on_cmd(Cmd::ResetLayout);
+        pair.a.on_net(online_event("b", OsKind::Macos));
+        pump(&mut pair);
+        assert_eq!(
+            neighbor_device(&pair.a.layout, "a", Side::Right).as_deref(),
+            Some("b")
+        );
+        assert_eq!(
+            neighbor_device(&pair.b.layout, "b", Side::Left).as_deref(),
+            Some("a")
+        );
+    }
+
+    #[test]
+    fn reset_layout_keeps_local_monitor_physical_bounds() {
+        let mut pair = pair_via_layout_exchange(
+            vec![display("1", 0, 100, 800, 600)],
+            vec![display("1", 0, 0, 800, 400)],
+        );
+        let before = pair
+            .a
+            .layout
+            .monitors
+            .iter()
+            .find(|m| m.device_id.0 == "a")
+            .unwrap()
+            .bounds;
+        pair.a.on_cmd(Cmd::ResetLayout);
+        let after = pair
+            .a
+            .layout
+            .monitors
+            .iter()
+            .find(|m| m.device_id.0 == "a")
+            .unwrap()
+            .bounds;
+        assert_eq!(before, after);
     }
 }

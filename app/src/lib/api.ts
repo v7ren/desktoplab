@@ -83,7 +83,8 @@ export type Cmd =
   | { MoveMonitor: { id: string; x: number; y: number } }
   | { CancelTransfer: number }
   | { OpenTransfer: number }
-  | "PromptPermissions";
+  | "PromptPermissions"
+  | "ResetLayout";
 
 let mock: Snapshot = {
   device_id: "local-1",
@@ -211,6 +212,10 @@ function applyMock(cmd: Cmd) {
     mock.accessibility = true;
     mock.input_monitoring = true;
     mock.status = "permissions granted";
+    return;
+  }
+  if (cmd === "ResetLayout") {
+    mock.status = "layout reset";
     return;
   }
   if ("SetPaused" in cmd) mock.paused = cmd.SetPaused;

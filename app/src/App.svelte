@@ -12,6 +12,7 @@
   let find = $state<{ x: number; y: number } | null>(null);
   let autostart = $state(false);
   let error = $state("");
+  let drag = $state<{ id: string; x: number; y: number } | null>(null);
 
   const hotkeyFields = [
     ["next_monitor", "Next monitor"],
@@ -62,6 +63,11 @@
     return value / 12;
   }
 
+  function effectiveMonitors(monitors: Snapshot["monitors"]): Snapshot["monitors"] {
+    if (!drag) return monitors;
+    return monitors.map((item) => (item.id === drag.id ? { ...item, x: drag.x, y: drag.y } : item));
+  }
+
   function monitorBox(monitor: Snapshot["monitors"][number], monitors: Snapshot["monitors"]) {
     const minX = Math.min(...monitors.map((item) => item.x));
     const minY = Math.min(...monitors.map((item) => item.y));
@@ -88,14 +94,37 @@
     if (!monitor) return;
     const originX = monitor.x;
     const originY = monitor.y;
+    let ended = false;
+    let throttle: ReturnType<typeof setTimeout> | null = null;
+    let latestX = originX;
+    let latestY = originY;
+    drag = { id, x: originX, y: originY };
     const move = (ev: PointerEvent) => {
-      const x = Math.round(originX + (ev.clientX - startX) * 12);
-      const y = Math.round(originY + (ev.clientY - startY) * 12);
-      void send({ MoveMonitor: { id, x, y } }).then(refresh);
+      if (ended) return;
+      latestX = Math.round(originX + (ev.clientX - startX) * 12);
+      latestY = Math.round(originY + (ev.clientY - startY) * 12);
+      drag = { id, x: latestX, y: latestY };
+      if (throttle) return;
+      throttle = setTimeout(() => {
+        throttle = null;
+        if (!ended) {
+          void send({ MoveMonitor: { id, x: latestX, y: latestY } });
+        }
+      }, 80);
     };
     const up = () => {
+      if (ended) return;
+      ended = true;
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", up);
+      if (throttle) {
+        clearTimeout(throttle);
+        throttle = null;
+      }
+      void send({ MoveMonitor: { id, x: latestX, y: latestY } }).then(() => {
+        drag = null;
+        void refresh();
+      });
     };
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", up);
@@ -201,9 +230,17 @@
       </label>
       <label class="check"><input type="checkbox" checked={snap.wrap} onchange={(e) => send({ SetWrap: e.currentTarget.checked }).then(refresh)} /> Wrap around this computer</label>
       <label class="check"><input type="checkbox" checked={snap.paused} onchange={(e) => send({ SetPaused: e.currentTarget.checked }).then(refresh)} /> Pause crossing</label>
+      <button
+        type="button"
+        class="reset-layout"
+        title="Put the computers back in the default arrangement"
+        onclick={() => send("ResetLayout").then(refresh)}
+      >
+        Reset layout
+      </button>
       <div class="canvas" aria-label="Monitor layout">
-        {#each snap.monitors as monitor}
-          {@const box = monitorBox(monitor, snap.monitors)}
+        {#each effectiveMonitors(snap.monitors) as monitor}
+          {@const box = monitorBox(monitor, effectiveMonitors(snap.monitors))}
           <button
             class="monitor"
             class:remote={monitor.device_id !== snap.device_id}
@@ -310,6 +347,7 @@
   .card { background: #181a1f; padding: 16px; border-radius: 12px; margin-bottom: 16px; }
   .code { font-size: 32px; letter-spacing: 6px; margin: 0; }
   input[aria-label="Pairing code"] { font-size: 28px; letter-spacing: 6px; max-width: 220px; }
+  .reset-layout { margin-top: 12px; width: fit-content; }
   .canvas { position: relative; height: 420px; background: #181a1f; border-radius: 12px; overflow: auto; }
   .monitor {
     position: absolute;
