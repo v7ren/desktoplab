@@ -49,6 +49,33 @@ pub fn wheel(dx: i32, dy: i32) {
     }
 }
 
+/// Synthesize a key transition by virtual-key code (used by the hook on return from remote).
+pub fn key_vk(vk: u16, down: bool) {
+    let mut flags = if down {
+        Default::default()
+    } else {
+        KEYEVENTF_KEYUP
+    };
+    if is_extended(vk) {
+        flags |= KEYEVENTF_EXTENDEDKEY;
+    }
+    let input = INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: VIRTUAL_KEY(vk),
+                wScan: 0,
+                dwFlags: flags,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    };
+    unsafe {
+        SendInput(&[input], size_of::<INPUT>() as i32);
+    }
+}
+
 pub fn key(hid: u16, down: bool) {
     let Some(vk) = to_vk(hid) else {
         return;

@@ -1806,6 +1806,7 @@ dependencies = [
  "objc2-foundation",
  "serde",
  "thiserror 2.0.21",
+ "tracing",
  "windows 0.61.3",
  "windows-core 0.61.2",
  "windows-implement",

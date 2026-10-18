@@ -1091,9 +1091,14 @@ impl Engine {
                     self.host.set_remote(false, 0, 0);
                 }
                 ControlCommand::ParkCursor => {
-                    let (x, y) = layout_center_phys(&self.layout, &self.session.monitor)
-                        .or_else(|| self.host.cursor_pos())
+                    let exit = self
+                        .host
+                        .cursor_pos()
+                        .or_else(|| layout_center_phys(&self.layout, &self.session.monitor))
                         .unwrap_or((0, 0));
+                    let displays = self.host.list_displays();
+                    let (x, y) =
+                        hop_platform::park_clip::park_point_for_remote(exit.0, exit.1, &displays);
                     self.host.set_remote(true, x, y);
                 }
                 ControlCommand::Forward { peer } => {

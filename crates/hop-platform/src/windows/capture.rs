@@ -1,8 +1,9 @@
 //! Low-level hooks. The callback only enqueues; a slow hook is removed by Windows.
 
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
-use std::sync::{mpsc, OnceLock};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
+use std::sync::{mpsc, Mutex, MutexGuard, OnceLock};
 use std::thread;
+use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwap;
 use crossbeam_channel::Sender;
@@ -18,6 +19,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WM_MOUSEWHEEL, WM_QUIT, WNDCLASSW,
 };
 
+use crate::local_keys::{LocalKeyState, MODIFIER_VKS};
+use crate::park_clip::CLIP_SPAN;
+use crate::remote_motion::should_forward_remote_motion;
 use crate::windows::display::list;
 use crate::InputEvent;
 
@@ -31,9 +35,13 @@ struct Shared {
     park_y: AtomicI32,
     last_x: AtomicI32,
     last_y: AtomicI32,
+    local_keys: Mutex<LocalKeyState>,
+    /// Monotonic ms when remote was enabled; 0 = not remote.
+    remote_enabled_ms: AtomicU64,
 }
 
 static SHARED: OnceLock<Shared> = OnceLock::new();
+static MONO_START: OnceLock<Instant> = OnceLock::new();
 static THREAD: AtomicU32 = AtomicU32::new(0);
 static MOUSE_HOOK: AtomicIsizePtr = AtomicIsizePtr::new();
 static KEY_HOOK: AtomicIsizePtr = AtomicIsizePtr::new();
@@ -68,21 +76,51 @@ pub fn set_remote(enabled: bool, park_x: i32, park_y: i32) {
         shared.park_y.store(park_y, Ordering::SeqCst);
         shared.last_x.store(park_x, Ordering::SeqCst);
         shared.last_y.store(park_y, Ordering::SeqCst);
-        shared.remote.store(enabled, Ordering::SeqCst);
         if enabled {
-            // A 1px clip stops WM_MOUSEMOVE, so the other computer gets one
-            // jump and then nothing. Keep a box the pointer can move in, and
-            // put that box in the middle of the monitor (the caller parks there).
-            let span = 160;
+            shared
+                .remote_enabled_ms
+                .store(monotonic_ms(), Ordering::SeqCst);
+            shared.remote.store(true, Ordering::SeqCst);
+            let local_down = lock_local_keys(shared).local_down_snapshot();
+            let modifiers = modifier_snapshot();
+            tracing::info!(
+                target: "devhop.platform",
+                park_x,
+                park_y,
+                local_down = ?local_down,
+                modifiers = ?modifiers,
+                "set_remote(true)"
+            );
             crate::windows::cursor::warp(park_x, park_y);
             crate::windows::cursor::clip(Some((
-                park_x.saturating_sub(span),
-                park_y.saturating_sub(span),
-                span * 2,
-                span * 2,
+                park_x.saturating_sub(CLIP_SPAN),
+                park_y.saturating_sub(CLIP_SPAN),
+                CLIP_SPAN * 2,
+                CLIP_SPAN * 2,
             )));
             crate::windows::cursor::hide();
         } else {
+            shared.remote.store(false, Ordering::SeqCst);
+            shared.remote_enabled_ms.store(0, Ordering::SeqCst);
+            let (local_down, releases) = {
+                let keys = lock_local_keys(shared);
+                (
+                    keys.local_down_snapshot(),
+                    keys.keys_to_release_on_remote_end(physical_key_down),
+                )
+            };
+            let modifiers = modifier_snapshot();
+            tracing::info!(
+                target: "devhop.platform",
+                local_down = ?local_down,
+                modifiers = ?modifiers,
+                releases = ?releases,
+                "set_remote(false)"
+            );
+            for vk in releases {
+                crate::windows::inject::key_vk(vk, false);
+            }
+            lock_local_keys(shared).clear();
             crate::windows::cursor::clip(None);
             crate::windows::cursor::show();
         }
@@ -101,6 +139,8 @@ pub fn start(tx: Sender<InputEvent>) -> Result<(), String> {
         park_y: AtomicI32::new(0),
         last_x: AtomicI32::new(0),
         last_y: AtomicI32::new(0),
+        local_keys: Mutex::new(LocalKeyState::default()),
+        remote_enabled_ms: AtomicU64::new(0),
     });
     let (ready_tx, ready_rx) = mpsc::channel();
     thread::Builder::new()
@@ -169,10 +209,14 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
         WM_MOUSEMOVE => {
             let remote = shared.remote.load(Ordering::SeqCst);
             let (dx, dy) = if remote {
-                (
-                    x - shared.park_x.load(Ordering::SeqCst),
-                    y - shared.park_y.load(Ordering::SeqCst),
-                )
+                let park_x = shared.park_x.load(Ordering::SeqCst);
+                let park_y = shared.park_y.load(Ordering::SeqCst);
+                let ms_since = ms_since_remote_enabled(shared);
+                if !should_forward_remote_motion(x, y, park_x, park_y, ms_since) {
+                    (0, 0)
+                } else {
+                    (x - park_x, y - park_y)
+                }
             } else {
                 (
                     x - shared.last_x.swap(x, Ordering::SeqCst),
@@ -250,6 +294,7 @@ unsafe extern "system" fn key_proc(code: i32, wparam: WPARAM, lparam: LPARAM) ->
     if injected {
         return CallNextHookEx(Some(KEY_HOOK.load()), code, wparam, lparam);
     }
+    let remote = shared.remote.load(Ordering::SeqCst);
     if down {
         if let Some(hid) = crate::keys_util::from_vk(vk) {
             let (ctrl, alt, shift, gui) = modifiers();
@@ -261,15 +306,70 @@ unsafe extern "system" fn key_proc(code: i32, wparam: WPARAM, lparam: LPARAM) ->
                 let _ = shared.tx.try_send(InputEvent::Hotkey(*action));
                 return LRESULT(1);
             }
-            let _ = shared.tx.try_send(InputEvent::Key { hid, down: true });
+            send_key_event(shared, InputEvent::Key { hid, down: true });
         }
     } else if let Some(hid) = crate::keys_util::from_vk(vk) {
-        let _ = shared.tx.try_send(InputEvent::Key { hid, down: false });
+        send_key_event(shared, InputEvent::Key { hid, down: false });
     }
-    if shared.remote.load(Ordering::SeqCst) {
+    if remote {
+        if !down {
+            match shared.local_keys.try_lock() {
+                Ok(mut keys) => {
+                    if keys.should_pass_up_to_os_while_remote(vk) {
+                        keys.on_passed_up(vk);
+                        return CallNextHookEx(Some(KEY_HOOK.load()), code, wparam, lparam);
+                    }
+                }
+                Err(_) => {
+                    return CallNextHookEx(Some(KEY_HOOK.load()), code, wparam, lparam);
+                }
+            }
+        }
         return LRESULT(1);
     }
+    if let Ok(mut keys) = shared.local_keys.try_lock() {
+        if down {
+            keys.on_passed_down(vk);
+        } else {
+            keys.on_passed_up(vk);
+        }
+    }
     CallNextHookEx(Some(KEY_HOOK.load()), code, wparam, lparam)
+}
+
+fn monotonic_ms() -> u64 {
+    MONO_START.get_or_init(Instant::now).elapsed().as_millis() as u64
+}
+
+fn ms_since_remote_enabled(shared: &Shared) -> Option<u64> {
+    let at = shared.remote_enabled_ms.load(Ordering::SeqCst);
+    if at == 0 {
+        None
+    } else {
+        Some(monotonic_ms().saturating_sub(at))
+    }
+}
+
+fn lock_local_keys(shared: &Shared) -> MutexGuard<'_, LocalKeyState> {
+    shared
+        .local_keys
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn send_key_event(shared: &Shared, event: InputEvent) {
+    let _ = shared.tx.send_timeout(event, Duration::from_millis(5));
+}
+
+fn physical_key_down(vk: u16) -> bool {
+    unsafe { GetAsyncKeyState(i32::from(vk)) < 0 }
+}
+
+fn modifier_snapshot() -> Vec<(u16, bool)> {
+    MODIFIER_VKS
+        .iter()
+        .map(|vk| (*vk, physical_key_down(*vk)))
+        .collect()
 }
 
 fn modifiers() -> (bool, bool, bool, bool) {

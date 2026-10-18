@@ -2,7 +2,10 @@
 //! Tests use [`MockHost`], which never touches the real cursor.
 
 pub mod keys_util;
+pub mod local_keys;
+pub mod park_clip;
 pub mod pointer;
+pub mod remote_motion;
 pub mod units;
 
 #[cfg(target_os = "windows")]

@@ -74,6 +74,7 @@ pub fn rel_move(dx: i32, dy: i32) {
     event.set_integer_value_field(EventField::MOUSE_EVENT_DELTA_X, dx as i64);
     event.set_integer_value_field(EventField::MOUSE_EVENT_DELTA_Y, dy as i64);
     event.post(CGEventTapLocation::HID);
+    super::cursor::note_injected_position(cx, cy);
 }
 
 pub fn button(button: u8, down: bool) {
