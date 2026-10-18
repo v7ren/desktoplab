@@ -12,7 +12,23 @@
   let find = $state<{ x: number; y: number } | null>(null);
   let autostart = $state(false);
   let error = $state("");
-  let drag = $state<{ id: string; x: number; y: number } | null>(null);
+  const CANVAS_MARGIN_LAYOUT = 240;
+
+  let drag = $state<{
+    id: string;
+    deviceId: string;
+    single: boolean;
+    canvasMinX: number;
+    canvasMinY: number;
+    originX: number;
+    originY: number;
+    blockMinX: number;
+    blockMinY: number;
+    blockW: number;
+    blockH: number;
+    x: number;
+    y: number;
+  } | null>(null);
 
   const hotkeyFields = [
     ["next_monitor", "Next monitor"],
@@ -63,18 +79,50 @@
     return value / 12;
   }
 
-  function effectiveMonitors(monitors: Snapshot["monitors"]): Snapshot["monitors"] {
-    if (!drag) return monitors;
-    return monitors.map((item) => (item.id === drag.id ? { ...item, x: drag.x, y: drag.y } : item));
+  function layoutOrigin(monitors: Snapshot["monitors"]): { minX: number; minY: number } {
+    if (drag) {
+      return { minX: drag.canvasMinX, minY: drag.canvasMinY };
+    }
+    const minX = Math.min(...monitors.map((item) => item.x)) - CANVAS_MARGIN_LAYOUT;
+    const minY = Math.min(...monitors.map((item) => item.y)) - CANVAS_MARGIN_LAYOUT;
+    return { minX, minY };
   }
 
-  function monitorBox(monitor: Snapshot["monitors"][number], monitors: Snapshot["monitors"]) {
-    const minX = Math.min(...monitors.map((item) => item.x));
-    const minY = Math.min(...monitors.map((item) => item.y));
+  function effectiveMonitors(monitors: Snapshot["monitors"]): Snapshot["monitors"] {
+    if (!drag) return monitors;
+    const dx = drag.x - drag.originX;
+    const dy = drag.y - drag.originY;
+    return monitors.map((item) => {
+      if (drag.single) {
+        return item.id === drag.id ? { ...item, x: drag.x, y: drag.y } : item;
+      }
+      if (item.device_id === drag.deviceId) {
+        return { ...item, x: item.x + dx, y: item.y + dy };
+      }
+      return item;
+    });
+  }
+
+  function canvasPixelSize(monitors: Snapshot["monitors"]) {
+    const origin = layoutOrigin(monitors);
+    const pad = 16;
+    const maxR = Math.max(...monitors.map((item) => item.x + item.width));
+    const maxB = Math.max(...monitors.map((item) => item.y + item.height));
+    return {
+      width: Math.max(scale(maxR - origin.minX) + pad * 2, 320),
+      height: Math.max(scale(maxB - origin.minY) + pad * 2, 280),
+    };
+  }
+
+  function monitorBox(
+    monitor: Snapshot["monitors"][number],
+    monitors: Snapshot["monitors"],
+    origin: { minX: number; minY: number },
+  ) {
     const pad = 16;
     return {
-      left: scale(monitor.x - minX) + pad,
-      top: scale(monitor.y - minY) + pad,
+      left: scale(monitor.x - origin.minX) + pad,
+      top: scale(monitor.y - origin.minY) + pad,
       width: Math.max(scale(monitor.width), 80),
       height: Math.max(scale(monitor.height), 48),
     };
@@ -87,22 +135,16 @@
 
   const SNAP_LAYOUT = 240;
 
-  function snapMonitorPosition(
-    id: string,
-    x: number,
-    y: number,
+  function snapRect(
+    nx: number,
+    ny: number,
+    w: number,
+    h: number,
+    selfDeviceId: string,
     monitors: Snapshot["monitors"],
-    shiftKey: boolean,
   ): { x: number; y: number } {
-    if (shiftKey) return { x, y };
-    const self = monitors.find((item) => item.id === id);
-    if (!self) return { x, y };
-    let nx = x;
-    let ny = y;
-    const w = self.width;
-    const h = self.height;
     for (const other of monitors) {
-      if (other.id === id) continue;
+      if (other.device_id === selfDeviceId) continue;
       const oR = other.x + other.width;
       const oB = other.y + other.height;
       const oCx = other.x + other.width / 2;
@@ -124,37 +166,99 @@
       sR = nx + w;
       sB = ny + h;
     }
-    return { x: Math.round(nx), y: Math.round(ny) };
+    return { x: nx, y: ny };
+  }
+
+  function snapMonitorPosition(
+    dragState: NonNullable<typeof drag>,
+    x: number,
+    y: number,
+    monitors: Snapshot["monitors"],
+    shiftKey: boolean,
+  ): { x: number; y: number } {
+    if (shiftKey) return { x, y };
+    const self = monitors.find((item) => item.id === dragState.id);
+    if (!self) return { x, y };
+    if (dragState.single) {
+      const snapped = snapRect(x, y, self.width, self.height, self.device_id, monitors);
+      return { x: Math.round(snapped.x), y: Math.round(snapped.y) };
+    }
+    const dx = x - dragState.originX;
+    const dy = y - dragState.originY;
+    const blockX = dragState.blockMinX + dx;
+    const blockY = dragState.blockMinY + dy;
+    const snapped = snapRect(
+      blockX,
+      blockY,
+      dragState.blockW,
+      dragState.blockH,
+      dragState.deviceId,
+      monitors,
+    );
+    const snapDx = snapped.x - dragState.blockMinX;
+    const snapDy = snapped.y - dragState.blockMinY;
+    return {
+      x: Math.round(dragState.originX + snapDx),
+      y: Math.round(dragState.originY + snapDy),
+    };
   }
 
   function onMonitorPointer(event: PointerEvent, id: string) {
+    if (!snap || snap.device_id === snap.monitors.find((item) => item.id === id)?.device_id) {
+      return;
+    }
     const target = event.currentTarget as HTMLElement;
     target.setPointerCapture(event.pointerId);
     const startX = event.clientX;
     const startY = event.clientY;
-    const monitor = snap?.monitors.find((item) => item.id === id);
+    const monitor = snap.monitors.find((item) => item.id === id);
     if (!monitor) return;
+    const monitors = snap.monitors;
+    const origin = layoutOrigin(monitors);
+    const deviceMons = monitors.filter((item) => item.device_id === monitor.device_id);
+    const blockMinX = Math.min(...deviceMons.map((item) => item.x));
+    const blockMinY = Math.min(...deviceMons.map((item) => item.y));
+    const blockMaxR = Math.max(...deviceMons.map((item) => item.x + item.width));
+    const blockMaxB = Math.max(...deviceMons.map((item) => item.y + item.height));
     const originX = monitor.x;
     const originY = monitor.y;
+    const single = event.altKey;
     let ended = false;
     let throttle: ReturnType<typeof setTimeout> | null = null;
     let latestX = originX;
     let latestY = originY;
-    drag = { id, x: originX, y: originY };
+    let latestSingle = single;
+    drag = {
+      id,
+      deviceId: monitor.device_id,
+      single,
+      canvasMinX: origin.minX,
+      canvasMinY: origin.minY,
+      originX,
+      originY,
+      blockMinX,
+      blockMinY,
+      blockW: blockMaxR - blockMinX,
+      blockH: blockMaxB - blockMinY,
+      x: originX,
+      y: originY,
+    };
     const move = (ev: PointerEvent) => {
-      if (ended) return;
+      if (ended || !drag) return;
       const rawX = Math.round(originX + (ev.clientX - startX) * 12);
       const rawY = Math.round(originY + (ev.clientY - startY) * 12);
-      const monitors = snap?.monitors ?? [];
-      const snapped = snapMonitorPosition(id, rawX, rawY, monitors, ev.shiftKey);
+      const base = snap?.monitors ?? [];
+      const dragState = { ...drag, single: ev.altKey };
+      const snapped = snapMonitorPosition(dragState, rawX, rawY, base, ev.shiftKey);
       latestX = snapped.x;
       latestY = snapped.y;
-      drag = { id, x: latestX, y: latestY };
+      latestSingle = ev.altKey;
+      drag = { ...dragState, x: latestX, y: latestY };
       if (throttle) return;
       throttle = setTimeout(() => {
         throttle = null;
         if (!ended) {
-          void send({ MoveMonitor: { id, x: latestX, y: latestY } });
+          void send({ MoveMonitor: { id, x: latestX, y: latestY, single: latestSingle } });
         }
       }, 80);
     };
@@ -167,7 +271,7 @@
         clearTimeout(throttle);
         throttle = null;
       }
-      void send({ MoveMonitor: { id, x: latestX, y: latestY } }).then(() => {
+      void send({ MoveMonitor: { id, x: latestX, y: latestY, single: latestSingle } }).then(() => {
         drag = null;
         void refresh();
       });
@@ -296,14 +400,23 @@
       >
         Reset layout
       </button>
-      <div class="canvas" aria-label="Monitor layout">
-        {#each effectiveMonitors(snap.monitors) as monitor}
-          {@const box = monitorBox(monitor, effectiveMonitors(snap.monitors))}
+      {@const shown = effectiveMonitors(snap.monitors)}
+      {@const origin = layoutOrigin(shown)}
+      {@const canvasSize = canvasPixelSize(shown)}
+      <div
+        class="canvas"
+        aria-label="Monitor layout"
+        style="min-width:{canvasSize.width}px;min-height:{canvasSize.height}px"
+      >
+        {#each shown as monitor}
+          {@const box = monitorBox(monitor, shown, origin)}
+          {@const isRemote = monitor.device_id !== snap.device_id}
           <button
             class="monitor"
-            class:remote={monitor.device_id !== snap.device_id}
+            class:remote={isRemote}
+            class:local={!isRemote}
             style="left:{box.left}px;top:{box.top}px;width:{box.width}px;height:{box.height}px"
-            onpointerdown={(event) => onMonitorPointer(event, monitor.id)}
+            onpointerdown={isRemote ? (event) => onMonitorPointer(event, monitor.id) : undefined}
           >
             {monitorLabel(monitor.name)}
           </button>
@@ -413,7 +526,9 @@
     border: 1px solid #6d84d6;
     border-radius: 6px;
   }
-  .monitor.remote { background: #243828; border-color: #6db57a; }
+  .monitor.remote { background: #243828; border-color: #6db57a; cursor: grab; }
+  .monitor.remote:active { cursor: grabbing; }
+  .monitor.local { cursor: not-allowed; opacity: 0.92; }
   ul { list-style: none; padding: 0; }
   li { display: flex; gap: 10px; align-items: center; padding: 10px 0; border-bottom: 1px solid #2a2d34; flex-wrap: wrap; }
   progress { width: 140px; }

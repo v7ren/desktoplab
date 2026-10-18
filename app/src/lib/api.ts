@@ -82,7 +82,7 @@ export type Cmd =
   | { RejectPair: string }
   | { Unpair: string }
   | { AddIp: string }
-  | { MoveMonitor: { id: string; x: number; y: number } }
+  | { MoveMonitor: { id: string; x: number; y: number; single?: boolean } }
   | { CancelTransfer: number }
   | { OpenTransfer: number }
   | "PromptPermissions"
@@ -285,9 +285,21 @@ function applyMock(cmd: Cmd) {
     });
   } else if ("MoveMonitor" in cmd) {
     const monitor = mock.monitors.find((item) => item.id === cmd.MoveMonitor.id);
-    if (monitor) {
-      monitor.x = cmd.MoveMonitor.x;
-      monitor.y = cmd.MoveMonitor.y;
+    if (monitor && monitor.device_id !== mock.device_id) {
+      const single = cmd.MoveMonitor.single ?? false;
+      const dx = cmd.MoveMonitor.x - monitor.x;
+      const dy = cmd.MoveMonitor.y - monitor.y;
+      if (single) {
+        monitor.x = cmd.MoveMonitor.x;
+        monitor.y = cmd.MoveMonitor.y;
+      } else {
+        for (const item of mock.monitors) {
+          if (item.device_id === monitor.device_id) {
+            item.x += dx;
+            item.y += dy;
+          }
+        }
+      }
     }
   } else if ("CancelTransfer" in cmd) {
     const transfer = mock.transfers.find((item) => item.id === cmd.CancelTransfer);
