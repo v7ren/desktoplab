@@ -244,7 +244,7 @@
     {:else if page === "Clipboard" && snap}
       <h2>Clipboard</h2>
       <label class="check"><input type="checkbox" checked={snap.clipboard_sync} onchange={(e) => send({ SetClipboard: e.currentTarget.checked }).then(refresh)} /> Sync clipboard on crossing</label>
-      <label class="check"><input type="checkbox" checked={snap.modifiers.ctrl_cmd} onchange={(e) => send({ SetModifiers: { ...snap.modifiers, ctrl_cmd: e.currentTarget.checked } }).then(refresh)} /> Windows Ctrl and Alt ↔ Mac Command</label>
+      <label class="check"><input type="checkbox" checked={snap.modifiers.alt_cmd} onchange={(e) => send({ SetModifiers: { ...snap.modifiers, alt_cmd: e.currentTarget.checked } }).then(refresh)} /> Windows Alt ↔ Mac Command</label>
       <label class="check"><input type="checkbox" checked={snap.modifiers.win_option} onchange={(e) => send({ SetModifiers: { ...snap.modifiers, win_option: e.currentTarget.checked } }).then(refresh)} /> Windows Win ↔ Mac Option</label>
       <label class="check"><input type="checkbox" checked={snap.scroll.natural} onchange={(e) => send({ SetScroll: { ...snap.scroll, natural: e.currentTarget.checked } }).then(refresh)} /> Natural scrolling</label>
       <label>Scroll speed

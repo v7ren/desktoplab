@@ -1,7 +1,8 @@
 //! Modifier translation and scroll normalization (R9).
 //!
-//! HID usages travel on the wire. When the machines differ, Ctrl and Alt can
-//! become Command, and Win can swap with Option.
+//! HID usages travel on the wire. When the machines differ, Windows Alt becomes
+//! Mac Command and Windows Win becomes Mac Option (and the inverse). Control
+//! passes through unchanged in both directions.
 
 use serde::{Deserialize, Serialize};
 
@@ -24,14 +25,18 @@ pub enum HostOs {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModifierMap {
-    pub ctrl_cmd: bool,
+    /// Windows Alt <-> Mac Command. Named `ctrl_cmd` before the mapping was
+    /// corrected, so old config.toml files still load through the alias.
+    #[serde(alias = "ctrl_cmd")]
+    pub alt_cmd: bool,
+    /// Windows Win <-> Mac Option.
     pub win_option: bool,
 }
 
 impl Default for ModifierMap {
     fn default() -> Self {
         Self {
-            ctrl_cmd: true,
+            alt_cmd: true,
             win_option: true,
         }
     }
@@ -65,12 +70,12 @@ pub fn translate_hid(map: ModifierMap, from: HostOs, to: HostOs, hid: u16) -> u1
 }
 
 fn windows_to_mac(map: ModifierMap, hid: u16) -> u16 {
-    // Ctrl and Alt both become Command. On a Windows keyboard Alt is the key
-    // people hold for Mac shortcuts, and Ctrl still maps the same way.
-    if map.ctrl_cmd && (hid == HID_LCTRL || hid == HID_LALT) {
+    // On a Windows keyboard, Alt is the key people hold for Mac shortcuts, so
+    // it becomes Command. Ctrl stays Ctrl, and the Windows key becomes Option.
+    if map.alt_cmd && hid == HID_LALT {
         return HID_LGUI;
     }
-    if map.ctrl_cmd && (hid == HID_RCTRL || hid == HID_RALT) {
+    if map.alt_cmd && hid == HID_RALT {
         return HID_RGUI;
     }
     if map.win_option && hid == HID_LGUI {
@@ -83,11 +88,13 @@ fn windows_to_mac(map: ModifierMap, hid: u16) -> u16 {
 }
 
 fn mac_to_windows(map: ModifierMap, hid: u16) -> u16 {
-    if map.ctrl_cmd && hid == HID_LGUI {
-        return HID_LCTRL;
+    // The inverse: Command becomes Alt, Option becomes the Windows key, and
+    // Control stays Ctrl.
+    if map.alt_cmd && hid == HID_LGUI {
+        return HID_LALT;
     }
-    if map.ctrl_cmd && hid == HID_RGUI {
-        return HID_RCTRL;
+    if map.alt_cmd && hid == HID_RGUI {
+        return HID_RALT;
     }
     if map.win_option && hid == HID_LALT {
         return HID_LGUI;
@@ -116,23 +123,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn command_c_on_the_mac_becomes_ctrl_c_on_windows() {
+    fn windows_ctrl_passes_through_and_alt_becomes_command() {
         let map = ModifierMap {
-            ctrl_cmd: true,
+            alt_cmd: true,
             win_option: true,
         };
+        // Control is never remapped, on either side.
         assert_eq!(
-            translate_hid(map, HostOs::Macos, HostOs::Windows, HID_LGUI),
+            translate_hid(map, HostOs::Windows, HostOs::Macos, HID_LCTRL),
             HID_LCTRL
         );
         assert_eq!(
-            translate_hid(map, HostOs::Macos, HostOs::Windows, HID_C),
-            HID_C
+            translate_hid(map, HostOs::Windows, HostOs::Macos, HID_RCTRL),
+            HID_RCTRL
         );
-        assert_eq!(
-            translate_hid(map, HostOs::Windows, HostOs::Macos, HID_LCTRL),
-            HID_LGUI
-        );
+        // Windows Alt -> Mac Command, keeping left and right on their own side.
         assert_eq!(
             translate_hid(map, HostOs::Windows, HostOs::Macos, HID_LALT),
             HID_LGUI
@@ -141,46 +146,116 @@ mod tests {
             translate_hid(map, HostOs::Windows, HostOs::Macos, HID_RALT),
             HID_RGUI
         );
-    }
-
-    #[test]
-    fn win_and_option_swap_without_touching_ctrl() {
-        let map = ModifierMap {
-            ctrl_cmd: true,
-            win_option: true,
-        };
+        // Windows Win -> Mac Option.
         assert_eq!(
             translate_hid(map, HostOs::Windows, HostOs::Macos, HID_LGUI),
             HID_LALT
         );
         assert_eq!(
-            translate_hid(map, HostOs::Macos, HostOs::Windows, HID_LALT),
-            HID_LGUI
-        );
-        assert_eq!(
-            translate_hid(map, HostOs::Macos, HostOs::Windows, HID_LCTRL),
-            HID_LCTRL
+            translate_hid(map, HostOs::Windows, HostOs::Macos, HID_RGUI),
+            HID_RALT
         );
     }
 
     #[test]
-    fn same_os_and_disabled_maps_leave_usages_alone() {
-        let off = ModifierMap {
-            ctrl_cmd: false,
+    fn mac_command_becomes_alt_and_option_becomes_win() {
+        let map = ModifierMap {
+            alt_cmd: true,
+            win_option: true,
+        };
+        // Command -> Alt.
+        assert_eq!(
+            translate_hid(map, HostOs::Macos, HostOs::Windows, HID_LGUI),
+            HID_LALT
+        );
+        assert_eq!(
+            translate_hid(map, HostOs::Macos, HostOs::Windows, HID_RGUI),
+            HID_RALT
+        );
+        // Option -> Win.
+        assert_eq!(
+            translate_hid(map, HostOs::Macos, HostOs::Windows, HID_LALT),
+            HID_LGUI
+        );
+        assert_eq!(
+            translate_hid(map, HostOs::Macos, HostOs::Windows, HID_RALT),
+            HID_RGUI
+        );
+        // Control passes through.
+        assert_eq!(
+            translate_hid(map, HostOs::Macos, HostOs::Windows, HID_LCTRL),
+            HID_LCTRL
+        );
+        assert_eq!(
+            translate_hid(map, HostOs::Macos, HostOs::Windows, HID_RCTRL),
+            HID_RCTRL
+        );
+        // Non-modifier keys are untouched.
+        assert_eq!(
+            translate_hid(map, HostOs::Macos, HostOs::Windows, HID_C),
+            HID_C
+        );
+    }
+
+    #[test]
+    fn each_toggle_controls_only_its_pair() {
+        // Alt/Command off: Alt stays Alt, but Win still swaps with Option.
+        let only_win = ModifierMap {
+            alt_cmd: false,
+            win_option: true,
+        };
+        assert_eq!(
+            translate_hid(only_win, HostOs::Windows, HostOs::Macos, HID_LALT),
+            HID_LALT
+        );
+        assert_eq!(
+            translate_hid(only_win, HostOs::Windows, HostOs::Macos, HID_LGUI),
+            HID_LALT
+        );
+        // Win/Option off: Win stays Win, but Alt still becomes Command.
+        let only_alt = ModifierMap {
+            alt_cmd: true,
             win_option: false,
         };
         assert_eq!(
-            translate_hid(off, HostOs::Windows, HostOs::Macos, HID_LCTRL),
-            HID_LCTRL
+            translate_hid(only_alt, HostOs::Windows, HostOs::Macos, HID_LALT),
+            HID_LGUI
         );
+        assert_eq!(
+            translate_hid(only_alt, HostOs::Windows, HostOs::Macos, HID_LGUI),
+            HID_LGUI
+        );
+    }
+
+    #[test]
+    fn disabled_maps_leave_hid_untouched() {
+        let off = ModifierMap {
+            alt_cmd: false,
+            win_option: false,
+        };
+        for hid in [
+            HID_LCTRL, HID_RCTRL, HID_LALT, HID_RALT, HID_LGUI, HID_RGUI, HID_LSHIFT, HID_RSHIFT,
+            HID_A, HID_C,
+        ] {
+            assert_eq!(translate_hid(off, HostOs::Windows, HostOs::Macos, hid), hid);
+            assert_eq!(translate_hid(off, HostOs::Macos, HostOs::Windows, hid), hid);
+        }
+    }
+
+    #[test]
+    fn same_os_leaves_usages_alone() {
         let on = ModifierMap::default();
+        assert_eq!(
+            translate_hid(on, HostOs::Windows, HostOs::Windows, HID_LALT),
+            HID_LALT
+        );
+        assert_eq!(
+            translate_hid(on, HostOs::Macos, HostOs::Macos, HID_LGUI),
+            HID_LGUI
+        );
         assert_eq!(
             translate_hid(on, HostOs::Windows, HostOs::Windows, HID_LCTRL),
             HID_LCTRL
-        );
-        assert_eq!(
-            translate_hid(on, HostOs::Macos, HostOs::Macos, HID_A),
-            HID_A
         );
     }
 

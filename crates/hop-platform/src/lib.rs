@@ -2,6 +2,7 @@
 //! Tests use [`MockHost`], which never touches the real cursor.
 
 pub mod keys_util;
+pub mod pointer;
 
 #[cfg(target_os = "windows")]
 pub mod windows;

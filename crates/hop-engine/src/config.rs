@@ -125,4 +125,20 @@ mod tests {
         assert_eq!(loaded.hotkeys.panic, "ctrl+alt+f12");
         assert!(!loaded.chords().is_empty());
     }
+
+    /// The old `ctrl_cmd` key still loads into the renamed `alt_cmd` field, so
+    /// an existing config.toml keeps its setting after the upgrade.
+    #[test]
+    fn old_ctrl_cmd_key_still_loads_as_alt_cmd() {
+        let dir = tempfile::tempdir().unwrap();
+        Config::default().save(dir.path()).unwrap();
+        let path = dir.path().join("config.toml");
+        let text = std::fs::read_to_string(&path)
+            .unwrap()
+            .replace("alt_cmd = true", "ctrl_cmd = false");
+        std::fs::write(&path, text).unwrap();
+        let loaded = Config::load_or_create(dir.path()).unwrap();
+        assert!(!loaded.modifiers.alt_cmd);
+        assert!(loaded.modifiers.win_option);
+    }
 }

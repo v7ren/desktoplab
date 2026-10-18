@@ -522,6 +522,47 @@ impl Engine {
         self.mark_snapshot_dirty();
     }
 
+    /// R2: this machine is being driven by a peer. After injecting the delta we
+    /// run the same geometry as a local hop, so the cursor stays inside the
+    /// monitors this machine actually owns and is handed back when pushed over
+    /// an edge that borders the controlling peer.
+    fn on_controlled_motion(&mut self, dx: i32, dy: i32) {
+        self.host.inject_rel(dx, dy);
+        let Some((x, y)) = self.host.cursor_pos() else {
+            return;
+        };
+        let online = self.crossable();
+        match on_motion(
+            &self.layout,
+            &mut self.session,
+            x,
+            y,
+            dx,
+            dy,
+            false,
+            &online,
+        ) {
+            MotionEffect::Stay => {}
+            MotionEffect::Warp { x, y, monitor } => {
+                self.session.monitor = monitor;
+                self.host.warp(x, y);
+            }
+            MotionEffect::Handoff {
+                peer,
+                x,
+                y,
+                monitor,
+            } => {
+                // Only the peer currently driving us can take control back.
+                if self.controller.as_deref() == Some(peer.0.as_str()) {
+                    self.send_control(&peer.0, enter_msg(&self.layout, &monitor, x, y));
+                    self.release_controller();
+                }
+            }
+        }
+        self.mark_snapshot_dirty();
+    }
+
     fn on_button(&mut self, button: u8, down: bool) {
         if button == 0 {
             self.button = down;
@@ -794,7 +835,7 @@ impl Engine {
                 let _ = peer;
                 if let Some(Datagram::Motion { dx, dy, .. }) = netloop::decode_packet(&bytes) {
                     if self.controller.is_some() {
-                        self.host.inject_rel(dx, dy);
+                        self.on_controlled_motion(dx, dy);
                     }
                 } else if let Some(Datagram::Heartbeat { .. }) = netloop::decode_packet(&bytes) {
                     if self.controlling().is_some() {
@@ -874,13 +915,23 @@ impl Engine {
                 nx_milli,
                 ny_milli,
             } => {
-                self.controller = Some(peer.to_string());
-                if let Some(monitor) = self.layout.monitor(&MonitorId(monitor_id)).cloned() {
-                    let (x, y) = denormalize(
-                        monitor.bounds,
-                        f64::from(nx_milli) / 1000.0,
-                        f64::from(ny_milli) / 1000.0,
-                    );
+                let nx = f64::from(nx_milli) / 1000.0;
+                let ny = f64::from(ny_milli) / 1000.0;
+                if self.controlling().as_deref() == Some(peer) {
+                    // The peer we are driving pushed its cursor back across the
+                    // shared edge. That is the return home, not a new handoff.
+                    let commands = self.control.handle(ControlEvent::CrossHome);
+                    self.apply(commands);
+                    self.remote = None;
+                } else {
+                    self.controller = Some(peer.to_string());
+                }
+                if let Some(monitor) = self.layout.monitor(&MonitorId(monitor_id.clone())).cloned()
+                {
+                    let (x, y) = denormalize(monitor.bounds, nx, ny);
+                    self.session.monitor = MonitorId(monitor_id);
+                    self.session.nx = nx;
+                    self.session.ny = ny;
                     self.host.warp(x, y);
                 }
             }
@@ -2061,5 +2112,429 @@ mod tests {
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
+    }
+
+    struct PeerPair {
+        a: Engine,
+        a_net: tokio::sync::mpsc::UnboundedReceiver<NetCmd>,
+        b: Engine,
+        b_net: tokio::sync::mpsc::UnboundedReceiver<NetCmd>,
+        a_host: Arc<MockHost>,
+        b_host: Arc<MockHost>,
+        _a_dir: tempfile::TempDir,
+        _b_dir: tempfile::TempDir,
+    }
+
+    fn test_monitor(id: &str, dev: &str, x: i32, y: i32, w: u32, h: u32) -> Monitor {
+        Monitor {
+            id: MonitorId(id.into()),
+            device_id: DeviceId(dev.into()),
+            name: id.into(),
+            bounds: PhysRect::new(x, y, w, h),
+            scale: 1.0,
+        }
+    }
+
+    fn pair_layout(monitors: Vec<Monitor>) -> Layout {
+        Layout {
+            devices: vec![
+                Device {
+                    id: DeviceId("pc".into()),
+                    name: "PC".into(),
+                },
+                Device {
+                    id: DeviceId("mac".into()),
+                    name: "Mac".into(),
+                },
+            ],
+            monitors,
+            wrap: false,
+        }
+    }
+
+    fn add_online(engine: &mut Engine, id: &str, os: OsKind) {
+        engine.online.insert(
+            id.to_string(),
+            Online {
+                name: id.to_string(),
+                os,
+                fingerprint: format!("fp-{id}"),
+                addr: "127.0.0.1:1".into(),
+                code: None,
+                stable_id: None,
+                rtt_p50_us: None,
+                rtt_p95_us: None,
+                loss_percent: 0.0,
+                max_beat_gap_ms: 0,
+                max_beat_recv_gap_ms: 0,
+                stalled: false,
+            },
+        );
+    }
+
+    /// A real `Engine` with a fixed device id, its `MockHost`, and the receiver
+    /// of the commands it would have handed to the net thread.
+    fn named_engine(
+        device_id: &str,
+    ) -> (
+        Engine,
+        Arc<MockHost>,
+        tokio::sync::mpsc::UnboundedReceiver<NetCmd>,
+        tempfile::TempDir,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config {
+            device_id: device_id.into(),
+            device_name: device_id.into(),
+            discovery: false,
+            port: 0,
+            ..Config::default()
+        };
+        config.save(dir.path()).unwrap();
+        let host = Arc::new(MockHost::new(vec![DisplayInfo {
+            id: "1".into(),
+            name: "Main".into(),
+            x: 0,
+            y: 0,
+            width: 100,
+            height: 100,
+            scale: 1.0,
+            primary: true,
+        }]));
+        let (engine, _host_results, net_rx) = test_engine(dir.path(), host.clone());
+        (engine, host, net_rx, dir)
+    }
+
+    fn setup_pair(monitors: Vec<Monitor>) -> PeerPair {
+        let (mut a, a_host, a_net, a_dir) = named_engine("pc");
+        let (mut b, b_host, b_net, b_dir) = named_engine("mac");
+        let layout = pair_layout(monitors);
+        a.layout = layout.clone();
+        b.layout = layout;
+        a.session.device = DeviceId("pc".into());
+        b.session.device = DeviceId("mac".into());
+        add_online(&mut a, "mac", OsKind::Macos);
+        add_online(&mut b, "pc", OsKind::Windows);
+        PeerPair {
+            a,
+            a_net,
+            b,
+            b_net,
+            a_host,
+            b_host,
+            _a_dir: a_dir,
+            _b_dir: b_dir,
+        }
+    }
+
+    fn motion_bytes(dx: i32, dy: i32) -> Vec<u8> {
+        hop_proto::encode_datagram(&Datagram::Motion {
+            seq: 0,
+            dx,
+            dy,
+            sent_us: 0,
+        })
+        .unwrap()
+    }
+
+    /// Deliver everything each side queued to the other, until both are quiet.
+    fn pump(pair: &mut PeerPair) {
+        loop {
+            let mut moved = false;
+            while let Ok(cmd) = pair.b_net.try_recv() {
+                moved = true;
+                match cmd {
+                    NetCmd::SendControl { msg, .. } => pair.a.on_msg("mac", msg),
+                    NetCmd::SendMotion { dx, dy, .. } => pair.a.on_net(NetEvt::Datagram {
+                        peer: "mac".into(),
+                        bytes: motion_bytes(dx, dy),
+                    }),
+                    _ => {}
+                }
+            }
+            while let Ok(cmd) = pair.a_net.try_recv() {
+                moved = true;
+                match cmd {
+                    NetCmd::SendControl { msg, .. } => pair.b.on_msg("pc", msg),
+                    NetCmd::SendMotion { dx, dy, .. } => pair.b.on_net(NetEvt::Datagram {
+                        peer: "pc".into(),
+                        bytes: motion_bytes(dx, dy),
+                    }),
+                    _ => {}
+                }
+            }
+            if !moved {
+                break;
+            }
+        }
+    }
+
+    /// Put A in the "driving mac" phase and drop B into the controlled state,
+    /// the way a real cross from A to B leaves both engines.
+    fn make_a_control_b(pair: &mut PeerPair, monitor: &str) {
+        let commands = pair.a.control.handle(ControlEvent::CrossTo {
+            peer: DeviceId("mac".into()),
+            button_held: false,
+        });
+        pair.a.apply(commands);
+        pair.a.remote = Some(RemoteSession::new(DeviceId("mac".into())));
+        pair.b.on_msg(
+            "pc",
+            StreamMsg::Enter {
+                monitor_id: monitor.into(),
+                nx_milli: 500,
+                ny_milli: 500,
+            },
+        );
+    }
+
+    /// (a) The controlled machine pushes its cursor back across the edge that
+    /// borders the controller. The controller must return to Local, warp to the
+    /// proportional spot, and the controlled side must clear and show its cursor.
+    #[test]
+    fn controlled_cursor_returns_home_over_the_shared_edge() {
+        let mut pair = setup_pair(vec![
+            test_monitor("pc:1", "pc", 0, 0, 1920, 1080),
+            test_monitor("mac:1", "mac", 1920, 0, 1920, 1440),
+        ]);
+        make_a_control_b(&mut pair, "mac:1");
+        assert_eq!(pair.a.controlling().as_deref(), Some("mac"));
+        assert_eq!(pair.b.controller.as_deref(), Some("pc"));
+
+        // B's cursor sits at the left edge of the taller Mac monitor, 75% down.
+        pair.b_host.warp(1921, 1080);
+        pair.b.on_net(NetEvt::Datagram {
+            peer: "pc".into(),
+            bytes: motion_bytes(-5, 0),
+        });
+
+        assert_eq!(pair.b.controller, None, "B must release control on return");
+        assert!(!pair.b_host.state().hidden, "B must show its cursor again");
+
+        pump(&mut pair);
+        assert_eq!(pair.a.controlling(), None, "A must be home");
+        assert!(pair.a.remote.is_none());
+        let (ax, ay) = pair.a_host.cursor_pos().unwrap();
+        assert_eq!(ax, 1919, "A warps to the Windows monitor edge");
+        assert!((ay - 809).abs() <= 2, "proportional y, got {ay}");
+    }
+
+    /// (b) Two monitors on the controlled machine: motion between them is a
+    /// local warp, not a hand back to the controller.
+    #[test]
+    fn motion_between_the_controlled_machines_own_monitors_warps() {
+        let mut pair = setup_pair(vec![
+            test_monitor("pc:1", "pc", 0, 0, 1920, 1080),
+            test_monitor("mac:1", "mac", 1920, 0, 1920, 1080),
+            test_monitor("mac:2", "mac", 3840, 0, 1920, 1080),
+        ]);
+        make_a_control_b(&mut pair, "mac:1");
+        assert_eq!(pair.b.session.monitor.0, "mac:1");
+
+        pair.b_host.warp(3839, 360);
+        pair.b.on_net(NetEvt::Datagram {
+            peer: "pc".into(),
+            bytes: motion_bytes(5, 0),
+        });
+
+        assert_eq!(pair.b.controller.as_deref(), Some("pc"), "still controlled");
+        assert_eq!(pair.b.session.monitor.0, "mac:2", "hopped on the Mac");
+        assert_eq!(pair.b_host.cursor_pos().unwrap(), (3840, 360));
+        assert!(
+            pair.b_net.try_recv().is_err(),
+            "a local monitor hop must not hand control back"
+        );
+    }
+
+    /// (c) An edge with no neighbor keeps the cursor on the controlled machine.
+    #[test]
+    fn pushing_past_an_edge_with_no_neighbor_stays() {
+        let mut pair = setup_pair(vec![
+            test_monitor("pc:1", "pc", 0, 0, 1920, 1080),
+            test_monitor("mac:1", "mac", 1920, 0, 1920, 1080),
+        ]);
+        make_a_control_b(&mut pair, "mac:1");
+
+        // The right edge of the Mac monitor faces nothing.
+        pair.b_host.warp(3839, 400);
+        pair.b.on_net(NetEvt::Datagram {
+            peer: "pc".into(),
+            bytes: motion_bytes(5, 0),
+        });
+
+        assert_eq!(pair.b.controller.as_deref(), Some("pc"));
+        assert_eq!(pair.b_host.cursor_pos().unwrap(), (3844, 400));
+        assert!(pair.b_net.try_recv().is_err());
+        assert_eq!(pair.a.controlling().as_deref(), Some("mac"));
+    }
+
+    /// (d) Crossing there and back twenty times must never leave either side
+    /// stuck (controlled without a controller, or controlling with no remote).
+    #[test]
+    fn crossing_there_and_back_twenty_times_never_sticks() {
+        let mut pair = setup_pair(vec![
+            test_monitor("pc:1", "pc", 0, 0, 1920, 1080),
+            test_monitor("mac:1", "mac", 1920, 0, 1920, 1080),
+        ]);
+        make_a_control_b(&mut pair, "mac:1");
+
+        for i in 0..20 {
+            // B is pushed back over the shared edge to A.
+            pair.b_host.warp(1921, 540);
+            pair.b.on_net(NetEvt::Datagram {
+                peer: "pc".into(),
+                bytes: motion_bytes(-5, 0),
+            });
+            assert_eq!(pair.b.controller, None, "round {i}: B stuck controlled");
+            pump(&mut pair);
+            assert_eq!(pair.a.controlling(), None, "round {i}: A stuck controlling");
+            assert!(pair.a.remote.is_none(), "round {i}: A remote not cleared");
+
+            // A pushes back into B.
+            let (ax, ay) = pair.a_host.cursor_pos().unwrap();
+            pair.a.on_motion(ax, ay, 5, 0);
+            assert_eq!(
+                pair.a.controlling().as_deref(),
+                Some("mac"),
+                "round {i}: A never crossed back"
+            );
+            pump(&mut pair);
+            assert_eq!(
+                pair.b.controller.as_deref(),
+                Some("pc"),
+                "round {i}: B never became controlled"
+            );
+        }
+    }
+
+    /// (e) A key and a button held while driving the peer are released on return.
+    #[test]
+    fn held_key_and_button_are_released_on_return() {
+        let mut pair = setup_pair(vec![
+            test_monitor("pc:1", "pc", 0, 0, 1920, 1080),
+            test_monitor("mac:1", "mac", 1920, 0, 1920, 1080),
+        ]);
+        make_a_control_b(&mut pair, "mac:1");
+
+        let hid: u16 = 0x04;
+        pair.a.on_key(hid, true);
+        pair.a.on_button(0, true);
+        pump(&mut pair);
+        assert!(pair.a.control.held_keys().contains(&hid));
+        assert!(pair.a.control.held_buttons().contains(&0));
+        assert!(mock_key_held(&pair.b_host, hid), "key never reached B");
+
+        // Return home.
+        pair.b_host.warp(1921, 540);
+        pair.b.on_net(NetEvt::Datagram {
+            peer: "pc".into(),
+            bytes: motion_bytes(-5, 0),
+        });
+        pump(&mut pair);
+
+        assert!(pair.a.control.held_keys().is_empty(), "A kept a key down");
+        assert!(
+            pair.a.control.held_buttons().is_empty(),
+            "A kept a button down"
+        );
+        assert!(!mock_key_held(&pair.b_host, hid), "B kept a key down");
+        assert_eq!(pair.a.controlling(), None);
+    }
+
+    /// Fix 1: the engine translates modifier keys for the peer's OS when it
+    /// sends them (`map_out`), and injects what it receives untouched (the
+    /// sender already translated). `MockHost` only; no sockets are opened.
+    #[test]
+    fn keys_are_translated_for_the_peers_os_on_the_way_out() {
+        use hop_core::mapping::{HID_LALT, HID_LCTRL, HID_LGUI};
+
+        let dir = tempfile::tempdir().unwrap();
+        let host = Arc::new(MockHost::new(vec![DisplayInfo {
+            id: "1".into(),
+            name: "Main".into(),
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 1080,
+            scale: 1.0,
+            primary: true,
+        }]));
+        let (mut engine, _host_results, mut net_rx) = test_engine(dir.path(), host.clone());
+        // A peer on the other OS, so translation is not a no-op.
+        let peer_os = if cfg!(windows) {
+            OsKind::Macos
+        } else {
+            OsKind::Windows
+        };
+        engine.online.insert(
+            "peer".into(),
+            Online {
+                name: "peer".into(),
+                os: peer_os,
+                fingerprint: "ff".into(),
+                addr: "127.0.0.1:1".into(),
+                code: None,
+                stable_id: None,
+                rtt_p50_us: None,
+                rtt_p95_us: None,
+                loss_percent: 0.0,
+                max_beat_gap_ms: 0,
+                max_beat_recv_gap_ms: 0,
+                stalled: false,
+            },
+        );
+        engine.control.handle(ControlEvent::CrossTo {
+            peer: DeviceId("peer".into()),
+            button_held: false,
+        });
+        assert_eq!(engine.controlling().as_deref(), Some("peer"));
+
+        let map = engine.config.modifiers;
+        let local = local_host_os();
+        let remote = as_host_os(peer_os).expect("peer OS maps to a host OS");
+        let expected = |hid: u16| translate_hid(map, local, remote, hid);
+
+        for hid in [HID_LALT, HID_LCTRL, HID_LGUI] {
+            engine.on_key(hid, true);
+            let sent = loop {
+                match net_rx.try_recv() {
+                    Ok(NetCmd::SendControl {
+                        msg: StreamMsg::Key { hid, down },
+                        ..
+                    }) => {
+                        assert!(down);
+                        break hid;
+                    }
+                    Ok(_) => continue,
+                    Err(_) => panic!("no key message was sent for {hid:#x}"),
+                }
+            };
+            assert_eq!(
+                sent,
+                expected(hid),
+                "hid {hid:#x} was not translated for the peer OS"
+            );
+        }
+        // Cross-OS these land on the other machine's GUI/Alt and Ctrl keys.
+        assert_eq!(expected(HID_LALT), HID_LGUI);
+        assert_eq!(expected(HID_LGUI), HID_LALT);
+        assert_eq!(expected(HID_LCTRL), HID_LCTRL);
+
+        // Inbound keys are injected exactly as received.
+        engine.controller = Some("peer".into());
+        engine.on_msg(
+            "peer",
+            StreamMsg::Key {
+                hid: HID_LGUI,
+                down: true,
+            },
+        );
+        assert!(
+            host.state()
+                .injected_keys
+                .iter()
+                .any(|(h, d)| *h == HID_LGUI && *d),
+            "an inbound key was not injected verbatim"
+        );
     }
 }

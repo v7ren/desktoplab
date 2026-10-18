@@ -52,7 +52,7 @@ export type Snapshot = {
   hop_mode: string;
   wrap: boolean;
   clipboard_sync: boolean;
-  modifiers: { ctrl_cmd: boolean; win_option: boolean };
+  modifiers: { alt_cmd: boolean; win_option: boolean };
   scroll: { natural: boolean; speed: number };
   hotkeys: Hotkeys;
   peers: Peer[];
@@ -73,7 +73,7 @@ export type Cmd =
   | { SetWrap: boolean }
   | { SetHotkey: { action: string; chord: string } }
   | { SetClipboard: boolean }
-  | { SetModifiers: { ctrl_cmd: boolean; win_option: boolean } }
+  | { SetModifiers: { alt_cmd: boolean; win_option: boolean } }
   | { SetScroll: { natural: boolean; speed: number } }
   | { ConfirmPair: { id: string; code: string } }
   | { PairByCode: string }
@@ -94,7 +94,7 @@ let mock: Snapshot = {
   hop_mode: "Relative",
   wrap: false,
   clipboard_sync: true,
-  modifiers: { ctrl_cmd: true, win_option: true },
+  modifiers: { alt_cmd: true, win_option: true },
   scroll: { natural: false, speed: 1 },
   hotkeys: {
     next_monitor: "ctrl+alt+right",
