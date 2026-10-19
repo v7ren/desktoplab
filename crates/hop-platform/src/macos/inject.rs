@@ -3,12 +3,14 @@
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
-use core_graphics::event::{CGEvent, CGEventTapLocation, CGEventType, CGMouseButton, EventField};
+use core_graphics::event::{
+    CGEvent, CGEventFlags, CGEventTapLocation, CGEventType, CGMouseButton, EventField,
+};
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 use core_graphics::geometry::CGPoint;
 
 use crate::keys_util::to_mac;
-use crate::pointer::{drag_action, ClickTracker, PointerAction};
+use crate::pointer::{drag_action, modifier_bits_from_held, ClickTracker, PointerAction};
 
 static HELD_KEYS: Mutex<Vec<u16>> = Mutex::new(Vec::new());
 static HELD_BUTTONS: Mutex<Vec<u8>> = Mutex::new(Vec::new());
@@ -17,6 +19,30 @@ static CLICKS: Mutex<ClickTracker> = Mutex::new(ClickTracker::new());
 
 fn source() -> Option<CGEventSource> {
     CGEventSource::new(CGEventSourceStateID::HIDSystemState).ok()
+}
+
+/// The modifier flags DevHop itself holds down, not the system's current state.
+/// Injected mouse events inherit the system flags, so a stuck injected Control
+/// would turn every injected click into a right-click. The lock is released
+/// before returning, so callers can post events without holding it.
+fn tracked_flags() -> CGEventFlags {
+    let held = HELD_KEYS.lock().expect("keys");
+    let bits = modifier_bits_from_held(&held);
+    drop(held);
+    let mut flags = CGEventFlags::empty();
+    if bits & 1 != 0 {
+        flags |= CGEventFlags::CGEventFlagControl;
+    }
+    if bits & 2 != 0 {
+        flags |= CGEventFlags::CGEventFlagShift;
+    }
+    if bits & 4 != 0 {
+        flags |= CGEventFlags::CGEventFlagAlternate;
+    }
+    if bits & 8 != 0 {
+        flags |= CGEventFlags::CGEventFlagCommand;
+    }
+    flags
 }
 
 /// Milliseconds since the first injection. Monotonic, so a wall-clock change
@@ -73,6 +99,7 @@ pub fn rel_move(dx: i32, dy: i32) {
     };
     event.set_integer_value_field(EventField::MOUSE_EVENT_DELTA_X, dx as i64);
     event.set_integer_value_field(EventField::MOUSE_EVENT_DELTA_Y, dy as i64);
+    event.set_flags(tracked_flags());
     event.post(CGEventTapLocation::HID);
     super::cursor::note_injected_position(cx, cy);
 }
@@ -109,6 +136,7 @@ pub fn button(button: u8, down: bool) {
         CGEvent::new_mouse_event(source, kind, CGPoint::new(x as f64, y as f64), mouse)
     {
         event.set_integer_value_field(EventField::MOUSE_EVENT_CLICK_STATE, click_state as i64);
+        event.set_flags(tracked_flags());
         event.post(CGEventTapLocation::HID);
     }
     let mut held = HELD_BUTTONS.lock().expect("buttons");
@@ -131,6 +159,7 @@ pub fn wheel(dx: i32, dy: i32) {
         dx,
         0,
     ) {
+        event.set_flags(tracked_flags());
         event.post(CGEventTapLocation::HID);
     }
 }

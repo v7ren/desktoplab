@@ -95,9 +95,52 @@ pub fn drag_action(held: &[u8]) -> PointerAction {
     }
 }
 
+/// Maps the HID usages DevHop has injected as held to a modifier bitmask:
+/// Control `1`, Shift `2`, Alt/Option `4`, Command `8`. Both left and right
+/// variants count. Non-modifier usages are ignored.
+pub fn modifier_bits_from_held(held_hids: &[u16]) -> u8 {
+    held_hids.iter().fold(0u8, |bits, hid| {
+        bits | match hid {
+            0xE0 | 0xE4 => 1,
+            0xE1 | 0xE5 => 2,
+            0xE2 | 0xE6 => 4,
+            0xE3 | 0xE7 => 8,
+            _ => 0,
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn modifier_bits_none_held_is_zero() {
+        assert_eq!(modifier_bits_from_held(&[]), 0);
+    }
+
+    #[test]
+    fn modifier_bits_left_ctrl_is_one() {
+        assert_eq!(modifier_bits_from_held(&[0xE0]), 1);
+        assert_eq!(modifier_bits_from_held(&[0xE4]), 1);
+    }
+
+    #[test]
+    fn modifier_bits_right_ctrl_and_left_shift_is_three() {
+        assert_eq!(modifier_bits_from_held(&[0xE4, 0xE1]), 3);
+    }
+
+    #[test]
+    fn modifier_bits_ignore_non_modifier_usages() {
+        assert_eq!(modifier_bits_from_held(&[0x04, 0x2C, 0x00]), 0);
+        assert_eq!(modifier_bits_from_held(&[0x04, 0xE2]), 4);
+    }
+
+    #[test]
+    fn modifier_bits_all_four_is_fifteen() {
+        assert_eq!(modifier_bits_from_held(&[0xE0, 0xE1, 0xE2, 0xE3]), 15);
+        assert_eq!(modifier_bits_from_held(&[0xE7, 0xE6, 0xE5, 0xE4]), 15);
+    }
 
     #[test]
     fn clicks_within_the_interval_and_pixels_count_up_to_three() {
