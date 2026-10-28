@@ -95,6 +95,21 @@ pub fn drag_action(held: &[u8]) -> PointerAction {
     }
 }
 
+/// macOS pointer injection modes: `0` warp then post at the HID tap (the old
+/// behaviour), `1` post only at the HID tap (default), `2` post only at the
+/// Session tap from a combined-session source.
+pub const POINTER_MODE_DEFAULT: u8 = 0;
+
+/// Keeps a stored pointer mode in range. Anything outside `0..=2` becomes the
+/// default, so a hand-edited or unknown value never disables injection.
+pub fn clamp_pointer_mode(mode: i64) -> u8 {
+    if (0..=2).contains(&mode) {
+        mode as u8
+    } else {
+        POINTER_MODE_DEFAULT
+    }
+}
+
 /// Maps the HID usages DevHop has injected as held to a modifier bitmask:
 /// Control `1`, Shift `2`, Alt/Option `4`, Command `8`. Both left and right
 /// variants count. Non-modifier usages are ignored.
@@ -113,6 +128,21 @@ pub fn modifier_bits_from_held(held_hids: &[u16]) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clamp_pointer_mode_keeps_known_modes() {
+        assert_eq!(clamp_pointer_mode(0), 0);
+        assert_eq!(clamp_pointer_mode(1), 1);
+        assert_eq!(clamp_pointer_mode(2), 2);
+    }
+
+    #[test]
+    fn clamp_pointer_mode_maps_unknown_values_to_default() {
+        assert_eq!(clamp_pointer_mode(9), POINTER_MODE_DEFAULT);
+        assert_eq!(clamp_pointer_mode(-1), POINTER_MODE_DEFAULT);
+        assert_eq!(clamp_pointer_mode(255), POINTER_MODE_DEFAULT);
+        assert_eq!(POINTER_MODE_DEFAULT, 0);
+    }
 
     #[test]
     fn modifier_bits_none_held_is_zero() {

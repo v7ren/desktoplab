@@ -56,6 +56,7 @@ export type Snapshot = {
   scroll: { natural: boolean; speed: number };
   scroll_reverse_incoming: boolean;
   park_inset_px: number;
+  mac_pointer_mode: number;
   cross_mode: "layout" | "proportional";
   hotkeys: Hotkeys;
   peers: Peer[];
@@ -80,6 +81,7 @@ export type Cmd =
   | { SetScroll: { natural: boolean; speed: number } }
   | { SetScrollReverseIncoming: boolean }
   | { SetParkInset: number }
+  | { SetMacPointerMode: number }
   | { SetCrossMode: "layout" | "proportional" }
   | { ConfirmPair: { id: string; code: string } }
   | { PairByCode: string }
@@ -105,6 +107,7 @@ let mock: Snapshot = {
   scroll: { natural: false, speed: 1 },
   scroll_reverse_incoming: false,
   park_inset_px: 160,
+  mac_pointer_mode: 0,
   cross_mode: "layout",
   hotkeys: {
     next_monitor: "ctrl+alt+right",
@@ -236,6 +239,10 @@ function applyMock(cmd: Cmd) {
   else if ("SetScrollReverseIncoming" in cmd)
     mock.scroll_reverse_incoming = cmd.SetScrollReverseIncoming;
   else if ("SetParkInset" in cmd) mock.park_inset_px = cmd.SetParkInset;
+  else if ("SetMacPointerMode" in cmd)
+    mock.mac_pointer_mode = [0, 1, 2].includes(cmd.SetMacPointerMode)
+      ? cmd.SetMacPointerMode
+      : 0;
   else if ("SetCrossMode" in cmd) mock.cross_mode = cmd.SetCrossMode;
   else if ("SetHotkey" in cmd) {
     const key = cmd.SetHotkey.action as keyof Hotkeys;

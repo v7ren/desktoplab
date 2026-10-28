@@ -1,5 +1,6 @@
 //! CGEvent injection. Held keys are tracked so a disconnect can release them.
 
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
@@ -10,7 +11,19 @@ use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 use core_graphics::geometry::CGPoint;
 
 use crate::keys_util::to_mac;
-use crate::pointer::{drag_action, modifier_bits_from_held, ClickTracker, PointerAction};
+use crate::pointer::{
+    clamp_pointer_mode, drag_action, modifier_bits_from_held, ClickTracker, PointerAction,
+    POINTER_MODE_DEFAULT,
+};
+
+/// How `rel_move` posts relative moves; see `pointer::POINTER_MODE_DEFAULT`.
+static MODE: AtomicU8 = AtomicU8::new(POINTER_MODE_DEFAULT);
+
+/// Stores the injection mode from settings. Out-of-range values fall back to
+/// the default.
+pub fn set_mode(mode: u8) {
+    MODE.store(clamp_pointer_mode(mode as i64), Ordering::Relaxed);
+}
 
 static HELD_KEYS: Mutex<Vec<u16>> = Mutex::new(Vec::new());
 static HELD_BUTTONS: Mutex<Vec<u8>> = Mutex::new(Vec::new());
@@ -89,8 +102,23 @@ pub fn rel_move(dx: i32, dy: i32) {
     let nx = x.saturating_add(dx);
     let ny = y.saturating_add(dy);
     let (cx, cy) = super::display::clamp_point_to_display(x, y, nx, ny);
-    super::cursor::warp(cx, cy);
-    let Some(source) = source() else { return };
+    let mode = MODE.load(Ordering::Relaxed);
+    // Mode 0 warps first (the old behaviour). The warp moves the cursor without
+    // an event, so the window server may see no change when the move arrives.
+    // Modes 1 and 2 only post the event, which the Dock and other tracking
+    // areas react to.
+    if mode == 0 {
+        super::cursor::warp(cx, cy);
+    }
+    let (source, tap) = if mode == 2 {
+        (
+            CGEventSource::new(CGEventSourceStateID::CombinedSessionState).ok(),
+            CGEventTapLocation::Session,
+        )
+    } else {
+        (source(), CGEventTapLocation::HID)
+    };
+    let Some(source) = source else { return };
     let (kind, mouse) = drag_event();
     let Ok(event) =
         CGEvent::new_mouse_event(source, kind, CGPoint::new(cx as f64, cy as f64), mouse)
@@ -100,7 +128,7 @@ pub fn rel_move(dx: i32, dy: i32) {
     event.set_integer_value_field(EventField::MOUSE_EVENT_DELTA_X, dx as i64);
     event.set_integer_value_field(EventField::MOUSE_EVENT_DELTA_Y, dy as i64);
     event.set_flags(tracked_flags());
-    event.post(CGEventTapLocation::HID);
+    event.post(tap);
     super::cursor::note_injected_position(cx, cy);
 }
 

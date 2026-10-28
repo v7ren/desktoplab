@@ -472,6 +472,19 @@
           <option value="proportional">Stretch to fit</option>
         </select>
       </label>
+      <label>Mac pointer injection
+        <select
+          value={snap.mac_pointer_mode}
+          onchange={(e) => send({ SetMacPointerMode: Number(e.currentTarget.value) }).then(refresh)}
+        >
+          <option value={1}>Post events only</option>
+          <option value={0}>Warp then post (default)</option>
+          <option value={2}>Session events</option>
+        </select>
+      </label>
+      <p class="muted">
+        Only matters when another computer controls this Mac. If the Dock or hover effects do not react, try another option.
+      </p>
       <div class="park-inset">
         <label>
           Parked cursor distance from the border: {snap.park_inset_px} px

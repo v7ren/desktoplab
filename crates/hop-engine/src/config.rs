@@ -44,6 +44,14 @@ pub struct Config {
     /// Inset from the monitor edge where the cursor parks while controlling a peer (Windows).
     #[serde(default = "default_park_inset_px")]
     pub park_inset_px: i32,
+    /// macOS injection when another computer controls this Mac: 0 warp then post,
+    /// 1 post only (default), 2 post to the session tap. See `hop_platform::pointer`.
+    #[serde(default = "default_mac_pointer_mode")]
+    pub mac_pointer_mode: u8,
+}
+
+fn default_mac_pointer_mode() -> u8 {
+    hop_platform::pointer::POINTER_MODE_DEFAULT
 }
 
 fn yes() -> bool {
@@ -100,6 +108,7 @@ impl Default for Config {
             port: 42424,
             discovery: true,
             park_inset_px: PARK_INSET_DEFAULT,
+            mac_pointer_mode: default_mac_pointer_mode(),
         }
     }
 }
@@ -107,6 +116,8 @@ impl Default for Config {
 impl Config {
     pub fn normalize(&mut self) {
         self.park_inset_px = clamp_park_inset(self.park_inset_px);
+        self.mac_pointer_mode =
+            hop_platform::pointer::clamp_pointer_mode(self.mac_pointer_mode as i64);
     }
 
     pub fn load_or_create(dir: &Path) -> Result<Self, String> {
@@ -200,6 +211,24 @@ mod tests {
         std::fs::write(&path, text).unwrap();
         let loaded = Config::load_or_create(dir.path()).unwrap();
         assert_eq!(loaded.park_inset_px, PARK_INSET_DEFAULT);
+    }
+
+    #[test]
+    fn mac_pointer_mode_defaults_to_zero_when_missing_from_toml() {
+        assert_eq!(Config::default().mac_pointer_mode, 0);
+        let dir = tempfile::tempdir().unwrap();
+        Config::default().save(dir.path()).unwrap();
+        let path = dir.path().join("config.toml");
+        let text = std::fs::read_to_string(&path)
+            .unwrap()
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("mac_pointer_mode"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!text.contains("mac_pointer_mode"));
+        std::fs::write(&path, &text).unwrap();
+        let loaded = Config::load_or_create(dir.path()).unwrap();
+        assert_eq!(loaded.mac_pointer_mode, 0);
     }
 
     #[test]

@@ -52,6 +52,9 @@ impl Host for MacHost {
     fn set_remote(&self, enabled: bool, park_x: i32, park_y: i32) {
         capture::set_remote(enabled, park_x, park_y);
     }
+    fn set_pointer_mode(&self, mode: u8) {
+        inject::set_mode(mode);
+    }
     fn set_hotkeys(&self, chords: Vec<(Chord, HotAction)>) {
         capture::set_hotkeys(chords);
     }

@@ -112,6 +112,8 @@ pub trait Host: Send + Sync {
     fn clip_rect(&self, rect: Option<(i32, i32, i32, i32)>);
     fn set_remote(&self, enabled: bool, park_x: i32, park_y: i32);
     fn set_park_span(&self, _span: i32) {}
+    /// macOS only: how injected pointer moves are posted (see `pointer::POINTER_MODE_DEFAULT`).
+    fn set_pointer_mode(&self, _mode: u8) {}
     fn set_hotkeys(&self, chords: Vec<(Chord, HotAction)>);
     fn inject_rel(&self, dx: i32, dy: i32);
     fn inject_button(&self, button: u8, down: bool);
@@ -149,6 +151,7 @@ pub struct MockState {
     pub hotkeys: Vec<(Chord, HotAction)>,
     pub drag_delay_ms: u64,
     pub park_span: i32,
+    pub pointer_mode: u8,
 }
 
 impl MockHost {
@@ -167,6 +170,7 @@ impl MockHost {
                 hotkeys: Vec::new(),
                 drag_delay_ms: 0,
                 park_span: park_clip::CLIP_SPAN,
+                pointer_mode: pointer::POINTER_MODE_DEFAULT,
             })),
         }
     }
@@ -207,6 +211,9 @@ impl Host for MockHost {
     }
     fn set_park_span(&self, span: i32) {
         self.inner.lock().expect("mock").park_span = span;
+    }
+    fn set_pointer_mode(&self, mode: u8) {
+        self.inner.lock().expect("mock").pointer_mode = mode;
     }
     fn set_hotkeys(&self, chords: Vec<(Chord, HotAction)>) {
         self.inner.lock().expect("mock").hotkeys = chords;

@@ -6,6 +6,7 @@ use hop_core::{
     ScrollNorm,
 };
 use hop_net::Identity;
+use hop_platform::pointer::clamp_pointer_mode;
 use hop_platform::{install, ClipboardItem, DisplayInfo, Host, InputEvent};
 use hop_proto::{ClipKind, Datagram, FileAnnounce, OsKind, StreamMsg};
 use serde::{Deserialize, Serialize};
@@ -100,6 +101,7 @@ pub struct Snapshot {
     pub scroll: ScrollNorm,
     pub scroll_reverse_incoming: bool,
     pub park_inset_px: i32,
+    pub mac_pointer_mode: u8,
     pub cross_mode: CrossMode,
     pub hotkeys: crate::config::HotkeyConfig,
     pub peers: Vec<PeerView>,
@@ -128,6 +130,7 @@ pub enum Cmd {
     SetScroll(ScrollNorm),
     SetScrollReverseIncoming(bool),
     SetParkInset(i32),
+    SetMacPointerMode(u8),
     SetCrossMode(CrossMode),
     ConfirmPair {
         id: String,
@@ -243,6 +246,7 @@ fn engine_main(
     }
     host.set_hotkeys(config.chords());
     host.set_park_span(config.park_inset_px);
+    host.set_pointer_mode(config.mac_pointer_mode);
     let incoming = dirs::download_dir()
         .unwrap_or_else(|| dir.join("Downloads"))
         .join("DevHop");
@@ -734,6 +738,11 @@ impl Engine {
             Cmd::SetParkInset(px) => {
                 self.config.park_inset_px = clamp_park_inset(px);
                 self.host.set_park_span(self.config.park_inset_px);
+                save_config = true;
+            }
+            Cmd::SetMacPointerMode(mode) => {
+                self.config.mac_pointer_mode = clamp_pointer_mode(mode as i64);
+                self.host.set_pointer_mode(self.config.mac_pointer_mode);
                 save_config = true;
             }
             Cmd::SetCrossMode(mode) => {
@@ -1452,6 +1461,7 @@ impl Engine {
             scroll: self.config.scroll,
             scroll_reverse_incoming: self.config.scroll_reverse_incoming,
             park_inset_px: self.config.park_inset_px,
+            mac_pointer_mode: self.config.mac_pointer_mode,
             cross_mode: self.config.cross_mode,
             hotkeys: self.config.hotkeys.clone(),
             peers,
@@ -1626,6 +1636,7 @@ fn empty_snapshot() -> Snapshot {
         scroll: ScrollNorm::default(),
         scroll_reverse_incoming: false,
         park_inset_px: crate::config::PARK_INSET_DEFAULT,
+        mac_pointer_mode: hop_platform::pointer::POINTER_MODE_DEFAULT,
         cross_mode: CrossMode::Layout,
         hotkeys: crate::config::HotkeyConfig::default(),
         peers: Vec::new(),
@@ -1945,6 +1956,7 @@ mod tests {
             apply_saved(&mut engine.layout, saved);
         }
         engine.host.set_park_span(engine.config.park_inset_px);
+        engine.host.set_pointer_mode(engine.config.mac_pointer_mode);
         (engine, host_results, net_rx)
     }
 
@@ -4140,6 +4152,36 @@ mod tests {
         engine.apply(vec![ControlCommand::ParkCursor]);
         assert_eq!(host.cursor_pos(), Some((1840, 400)));
         assert_eq!(host.state().park_span, 80);
+    }
+
+    #[test]
+    fn mac_pointer_mode_clamps_persists_and_reaches_host() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = Arc::new(MockHost::new(vec![DisplayInfo {
+            id: "1".into(),
+            name: "Main".into(),
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 1080,
+            scale: 1.0,
+            primary: true,
+        }]));
+        let (mut engine, _, _) = test_engine(dir.path(), host.clone());
+        assert_eq!(host.state().pointer_mode, 0);
+
+        engine.on_cmd(Cmd::SetMacPointerMode(9));
+        assert_eq!(engine.config.mac_pointer_mode, 0);
+        assert_eq!(host.state().pointer_mode, 0);
+
+        engine.on_cmd(Cmd::SetMacPointerMode(0));
+        assert_eq!(host.state().pointer_mode, 0);
+
+        engine.on_cmd(Cmd::SetMacPointerMode(2));
+        assert_eq!(host.state().pointer_mode, 2);
+        engine.flush_config();
+        let loaded = Config::load_or_create(dir.path()).unwrap();
+        assert_eq!(loaded.mac_pointer_mode, 2);
     }
 
     #[test]
